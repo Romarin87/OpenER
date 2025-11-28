@@ -10,11 +10,11 @@ from typing import List
 class OrcaSettings:
     """Settings for ORCA submissions."""
 
-    executable: str = "orca"
+    executable: str = "/inspire/hdd/global_user/libowen-253207030265/soft/orca-6.0.1/orca"
     ts_keywords: str = "! B3LYP D3BJ def2-SVP OptTS Freq"
     common_resources: List[str] = field(
         default_factory=lambda: [
-            "%pal nprocs 4 end",
+            "%pal nprocs 32 end",
             "%maxcore 4000",
         ]
     )
