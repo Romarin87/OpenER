@@ -6,7 +6,7 @@
 - TS 几何优化：`! B3LYP D3BJ def2-SVP OptTS Freq`，遇到 SCF/步数问题自动重启并启用更紧的设置。
 - 一阶鞍点验证：解析 ORCA 输出频率，要求虚频数量=1 且 |ν|>20 cm⁻¹。
 - SOAP 去重：使用 DScribe 生成全局 SOAP 描述符，SQLite 持久化，基于 Average Kernel (metric=laplacian) 相似度 S>0.999 判定重复。
-- IRC 路径：`! B3LYP D3BJ def2-SVP IRC`，Direction Both，MaxIter 50，StepSize 0.1，提取两端最低能几何作为 Reactant/Product guess。
+- IRC 路径：`! B3LYP D3BJ def2-SVP IRC`，Direction Both，MaxIter 50，StepSize 0.1；若收敛困难，会尝试 LQA/HPC 算法的备用输入；提取两端最低能几何作为 Reactant/Product guess。
 - 端点最优化：与 TS 同级别 `! B3LYP D3BJ def2-SVP Opt Freq`，确认无虚频。
 - Canonical SMILES 对比：OpenBabel 生成 SMILES，验证 IRC 端点与最优化结构拓扑一致。
 

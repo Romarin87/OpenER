@@ -158,12 +158,16 @@ class OrcaRunner:
         current_atoms = atoms
         while attempt <= max_restarts:
             suffix = "" if attempt == 0 else f"_retry{attempt}"
+            blocks = (
+                list(self.settings.common_resources)
+                + (list(self.settings.geom_block) if attempt == 0 else list(self.settings.ts_restart_blocks))
+            )
             out = self._run_job(
                 current_atoms,
                 job_name + suffix,
                 workdir,
                 keywords=self.settings.ts_keywords,
-                blocks=self.settings.ts_blocks if attempt == 0 else self.settings.restart_blocks,
+                blocks=blocks,
                 charge=charge,
                 mult=mult,
             )
@@ -192,17 +196,32 @@ class OrcaRunner:
         charge: int = 0,
         mult: int = 1,
     ) -> Path:
-        """Submit IRC calculation in both directions."""
-        blocks = list(self.settings.ts_blocks) + [self.settings.irc_block]
-        return self._run_job(
-            atoms,
-            job_name,
-            workdir,
-            keywords=self.settings.irc_keywords,
-            blocks=blocks,
-            charge=charge,
-            mult=mult,
-        )
+        """
+        Submit IRC calculation in both directions, with optional fallbacks (LQA/HPC).
+        """
+        attempts: list[tuple[str, str]] = [(job_name, self.settings.irc_block)]
+        if self.settings.irc_block_lqa:
+            attempts.append((f"{job_name}_lqa", self.settings.irc_block_lqa))
+        if self.settings.irc_block_hpc:
+            attempts.append((f"{job_name}_hpc", self.settings.irc_block_hpc))
+
+        last_error: OrcaJobError | None = None
+        for name, block in attempts:
+            blocks = list(self.settings.common_resources) + [block]
+            try:
+                return self._run_job(
+                    atoms,
+                    name,
+                    workdir,
+                    keywords=self.settings.irc_keywords,
+                    blocks=blocks,
+                    charge=charge,
+                    mult=mult,
+                )
+            except OrcaJobError as exc:
+                last_error = exc
+                continue
+        raise last_error or OrcaJobError("IRC calculations failed for all strategies")
 
     def optimize_minimum(
         self,
@@ -213,12 +232,13 @@ class OrcaRunner:
         mult: int = 1,
     ) -> tuple[Path, Atoms]:
         """Standard Opt+Freq at same theory level as TS."""
+        blocks = list(self.settings.common_resources) + list(self.settings.geom_block)
         out = self._run_job(
             atoms,
             job_name,
             workdir,
             keywords=self.settings.opt_keywords,
-            blocks=self.settings.ts_blocks,
+            blocks=blocks,
             charge=charge,
             mult=mult,
         )
@@ -238,11 +258,14 @@ def summarize_job_template(settings: OrcaSettings) -> str:
     return textwrap.dedent(
         f"""
         TS keywords: {settings.ts_keywords}
-        TS blocks:
-        {chr(10).join(settings.ts_blocks)}
+        Common resources:
+        {chr(10).join(settings.common_resources)}
 
-        Restart blocks:
-        {chr(10).join(settings.restart_blocks)}
+        Geometry block:
+        {chr(10).join(settings.geom_block)}
+
+        TS restart blocks:
+        {chr(10).join(settings.ts_restart_blocks)}
 
         IRC keywords: {settings.irc_keywords}
         IRC block:

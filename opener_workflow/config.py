@@ -12,14 +12,14 @@ class OrcaSettings:
 
     executable: str = "orca"
     ts_keywords: str = "! B3LYP D3BJ def2-SVP OptTS Freq"
-    ts_blocks: List[str] = field(
+    common_resources: List[str] = field(
         default_factory=lambda: [
             "%pal nprocs 4 end",
             "%maxcore 4000",
-            "%geom MaxIter 200 end",
         ]
     )
-    restart_blocks: List[str] = field(
+    geom_block: List[str] = field(default_factory=lambda: ["%geom MaxIter 200 end"])
+    ts_restart_blocks: List[str] = field(
         default_factory=lambda: [
             "%scf Convergence Tight end",
             "%scf XQC true end",
@@ -34,6 +34,26 @@ class OrcaSettings:
             "  Direction Both",
             "  MaxIter 50",
             "  StepSize 0.1",
+            "end",
+        ]
+    )
+    irc_block_lqa: str = "\n".join(
+        [
+            "%irc",
+            "  Direction Both",
+            "  MaxIter 50",
+            "  StepSize 0.1",
+            "  Method LQA",
+            "end",
+        ]
+    )
+    irc_block_hpc: str = "\n".join(
+        [
+            "%irc",
+            "  Direction Both",
+            "  MaxIter 50",
+            "  StepSize 0.1",
+            "  Method HPC",
             "end",
         ]
     )
