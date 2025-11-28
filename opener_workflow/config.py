@@ -47,8 +47,8 @@ class SOAPSettings:
     r_cut: float = 6.0
     n_max: int = 8
     l_max: int = 6
+    kernel_gamma: float = 1.0
     threshold_similarity: float = 0.999
-    threshold_distance: float = 1e-3
 
 
 @dataclass

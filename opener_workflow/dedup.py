@@ -13,7 +13,7 @@ from typing import Dict, List, Optional, Tuple
 import numpy as np
 from ase import Atoms
 from dscribe.descriptors import SOAP
-from scipy.spatial import cKDTree
+from dscribe.kernels import AverageKernel
 
 from .config import SOAPSettings
 
@@ -111,18 +111,9 @@ class SOAPDeduplicator:
             return False, None
 
         matrix = np.vstack([r["vector"] for r in existing])
-        tree = cKDTree(matrix)
-        dist, idx = tree.query(vec, k=min(5, len(existing)))
-        if np.isscalar(dist):
-            dist = [dist]
-            idx = [idx]
-        for d, i in zip(dist, idx):
-            if np.isfinite(d) and d < self.settings.threshold_distance:
-                return True, existing[int(i)]["source"]
-
-        norms = np.linalg.norm(matrix, axis=1) * np.linalg.norm(vec)
-        with np.errstate(divide="ignore", invalid="ignore"):
-            sims = matrix.dot(vec) / norms
+        # Laplacian average kernel for similarity scoring
+        kernel = AverageKernel(metric="laplacian", gamma=self.settings.kernel_gamma)
+        sims = kernel.create(vec[None, :], matrix)[0]
         best_idx = int(np.nanargmax(sims))
         best_sim = sims[best_idx]
         if best_sim > self.settings.threshold_similarity:
