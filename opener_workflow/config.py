@@ -10,12 +10,13 @@ from typing import List
 class OrcaSettings:
     """Settings for ORCA submissions."""
 
-    executable: str = "/inspire/hdd/global_user/libowen-253207030265/soft/orca-6.0.1/orca"
+    #executable: str = "/inspire/hdd/global_user/libowen-253207030265/soft/orca-6.0.1/orca"
+    executable: str = "/Users/bwli/soft/orca-6.1.0/orca"
     ts_keywords: str = "! B3LYP D3BJ def2-SVP OptTS Freq"
     common_resources: List[str] = field(
         default_factory=lambda: [
-            "%pal nprocs 32 end",
-            "%maxcore 4000",
+            "%pal nprocs 4 end",
+            "%maxcore 2000",
         ]
     )
     geom_block: List[str] = field(default_factory=lambda: ["%geom MaxIter 200 end"])
@@ -33,27 +34,6 @@ class OrcaSettings:
             "%irc",
             "  Direction Both",
             "  MaxIter 50",
-            "  StepSize 0.1",
-            "end",
-        ]
-    )
-    irc_block_lqa: str = "\n".join(
-        [
-            "%irc",
-            "  Direction Both",
-            "  MaxIter 50",
-            "  StepSize 0.1",
-            "  Method LQA",
-            "end",
-        ]
-    )
-    irc_block_hpc: str = "\n".join(
-        [
-            "%irc",
-            "  Direction Both",
-            "  MaxIter 50",
-            "  StepSize 0.1",
-            "  Method HPC",
             "end",
         ]
     )
@@ -67,6 +47,7 @@ class SOAPSettings:
     r_cut: float = 6.0
     n_max: int = 8
     l_max: int = 6
+    average_mode: str = "outer"
     kernel_gamma: float = 1.0
     threshold_similarity: float = 0.999
 

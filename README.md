@@ -5,8 +5,8 @@
 ## 功能模块
 - TS 几何优化：`! B3LYP D3BJ def2-SVP OptTS Freq`，遇到 SCF/步数问题自动重启并启用更紧的设置。
 - 一阶鞍点验证：解析 ORCA 输出频率，要求虚频数量=1 且 |ν|>20 cm⁻¹。
-- SOAP 去重：使用 DScribe 生成全局 SOAP 描述符，SQLite 持久化，基于 Average Kernel (metric=laplacian) 相似度 S>0.999 判定重复。
-- IRC 路径：`! B3LYP D3BJ def2-SVP IRC`，Direction Both，MaxIter 50，StepSize 0.1；若收敛困难，会尝试 LQA/HPC 算法的备用输入；提取两端最低能几何作为 Reactant/Product guess。
+- SOAP 去重：使用 DScribe 生成全局 SOAP 描述符（`average="outer"`），SQLite 持久化，基于 Average Kernel (metric=laplacian) 相似度 S>0.999 判定重复。
+- IRC 路径：`! B3LYP D3BJ def2-SVP IRC`，Direction Both，MaxIter 50（可在 `config.py` 调整 StepSize/备用算法块）；流程直接使用 ORCA 写出的 `_IRC_B.xyz` / `_IRC_F.xyz` 作为反应物/生成物端点，缺失则视为 IRC 失败。
 - 端点最优化：与 TS 同级别 `! B3LYP D3BJ def2-SVP Opt Freq`，确认无虚频。
 - Canonical SMILES 对比：OpenBabel 生成 SMILES，验证 IRC 端点与最优化结构拓扑一致。
 
@@ -24,18 +24,17 @@ python -m opener_workflow.pipeline \
 ```
 
 未指定 `--workdir` 时默认生成 `runs/<时间戳>/`，避免覆盖旧结果；如需固定路径可显式传入。运行结束后，每个结构的结果放在 `workdir/<结构标签>/`，并包含：
-- `TS_opt/`：ts_opt.inp/out 及 ts_opt_opt.xyz
-- `IRC/`：irc.inp/out 及端点猜测 `irc_reactant_guess.xyz`, `irc_product_guess.xyz`
-- `RP_opt/`：reactant.* 和 product.* 的优化/频率输出及 *_opt.xyz
+- `TS_opt/`：ts_opt.inp/out 及 ORCA 写出的 ts_opt.xyz（最终结构）。
+- `IRC/`：irc.inp/out 及 ORCA 写出的端点 `irc_IRC_B.xyz`（Backward）和 `irc_IRC_F.xyz`（Forward）。
+- `RP_opt/`：reactant.* 和 product.* 的 Opt+Freq 输出及 ORCA 写出的 reactant.xyz / product.xyz。
 - `run.log` 与 `result.json`：该结构的流程日志与摘要
 可选 `--json summary.json` 仍可导出全局汇总。
 
 ## 关键文件
 - `opener_workflow/config.py`：ORCA 关键字、SOAP 阈值、虚频判据。
-- `opener_workflow/orca_runner.py`：ORCA 提交与自动重启，解析最终几何。
+- `opener_workflow/orca_runner.py`：ORCA 提交与自动重启，直接读取 ORCA 输出的 xyz（包括 TS、IRC 端点、端点优化）。
 - `opener_workflow/analysis.py`：频率解析与鞍点/极小点判定。
 - `opener_workflow/dedup.py`：SOAP 指纹计算、SQLite 存储与重复检测。
-- `opener_workflow/irc.py`：IRC 输出解析，选择反应/生成物猜测结构。
 - `opener_workflow/smiles_check.py`：Canonical SMILES 生成与匹配。
 - `opener_workflow/pipeline.py`：整体流程（TS 优化 → 验证 → 去重 → IRC → 端点优化 → SMILES 校验）及 CLI。
 

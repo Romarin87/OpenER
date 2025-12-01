@@ -27,11 +27,12 @@ def read_frequencies(output_path: Path) -> List[float]:
                 continue
             if "NORMAL MODES" in line.upper():
                 break
-            matches = re.findall(r"[-+]?\d+\.\d+|\d+", line)
-            if not matches:
+            # Lines with actual frequencies contain "cm". Skip other info (e.g., scaling factor).
+            match = re.search(r"([-+]?\d*\.\d+|[-+]?\d+)\s*cm", line, flags=re.IGNORECASE)
+            if not match:
                 continue
             try:
-                freq = float(matches[-1])
+                freq = float(match.group(1))
             except ValueError:
                 continue
             freqs.append(freq)
@@ -45,8 +46,10 @@ def is_valid_saddle_point(freqs: List[float], cfg: FrequencyCheck) -> bool:
     significant_imag = [f for f in freqs if f < -cfg.min_imag_threshold]
     if len(significant_imag) != cfg.expected_imag_count:
         return False
-    if freqs and freqs[0] >= -cfg.min_imag_threshold:
-        return False
+    if freqs:
+        min_freq = min(freqs)
+        if min_freq >= -cfg.min_imag_threshold:
+            return False
     return True
 
 

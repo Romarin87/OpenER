@@ -58,10 +58,10 @@ class SOAPDeduplicator:
         species = sorted(set(atoms.get_chemical_symbols()))
         soap = SOAP(
             species=species,
-            rcut=self.settings.r_cut,
-            nmax=self.settings.n_max,
-            lmax=self.settings.l_max,
-            average=True,
+            r_cut=self.settings.r_cut,
+            n_max=self.settings.n_max,
+            l_max=self.settings.l_max,
+            average=self.settings.average_mode,
         )
         self.soap_cache[comp] = soap
         return soap

@@ -29,6 +29,18 @@ def write_xyz(atoms: Atoms, path: str | os.PathLike) -> None:
     write(path, atoms, format="xyz")
 
 
+def read_last_xyz_frame(path: str | os.PathLike) -> Atoms:
+    """Read the last frame from an xyz file (ORCA writes single-frame xyz by default)."""
+    p = Path(path)
+    if not p.exists():
+        raise FileNotFoundError(path)
+    atoms = read(p, index=-1)
+    # Some readers may return a list if index handling changes; guard for safety.
+    if isinstance(atoms, list):
+        atoms = atoms[-1]
+    return atoms
+
+
 def atoms_to_orca_input(
     atoms: Atoms,
     keywords: str,

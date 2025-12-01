@@ -22,9 +22,7 @@ from .io_utils import (
     ensure_dir,
     read_orca_input_geometry,
     read_xyz_frames,
-    write_xyz,
 )
-from .irc import select_irc_endpoints
 from .orca_runner import OrcaJobError, OrcaRunner
 from .smiles_check import compare_endpoints
 
@@ -84,10 +82,10 @@ class TransitionStatePipeline:
 
         try:
             _log("Starting TS optimization")
-            ts_out, ts_atoms = self.runner.optimize_ts(
+            ts_out, ts_xyz, ts_atoms = self.runner.optimize_ts(
                 atoms, job_name="ts_opt", workdir=ts_dir, charge=charge, mult=mult
             )
-            outputs["ts_out"] = str(ts_out)
+            outputs.update({"ts_out": str(ts_out), "ts_xyz": str(ts_xyz)})
         except OrcaJobError as exc:
             _log(f"TS optimization failed: {exc}")
             return _finalize(PipelineResult(label, "failed", f"TS optimization failed: {exc}", outputs))
@@ -108,26 +106,36 @@ class TransitionStatePipeline:
 
         try:
             _log("Running IRC")
-            irc_out = self.runner.run_irc(
+            irc_out, back_xyz, forward_xyz, irc_reactant, irc_product = self.runner.run_irc(
                 ts_atoms, job_name="irc", workdir=irc_dir, charge=charge, mult=mult
             )
-            outputs["irc_out"] = str(irc_out)
-            irc_reactant, irc_product = select_irc_endpoints(Path(irc_out))
+            outputs.update(
+                {
+                    "irc_out": str(irc_out),
+                    "irc_backward_xyz": str(back_xyz),
+                    "irc_forward_xyz": str(forward_xyz),
+                }
+            )
         except Exception as exc:  # noqa: BLE001
             _log(f"IRC failed: {exc}")
             return _finalize(PipelineResult(label, "failed", f"IRC failed: {exc}", outputs, metadata))
 
-        write_xyz(irc_reactant, irc_dir / "irc_reactant_guess.xyz")
-        write_xyz(irc_product, irc_dir / "irc_product_guess.xyz")
         try:
             _log("Optimizing IRC endpoints")
-            opt_r_out, opt_r_atoms = self.runner.optimize_minimum(
+            opt_r_out, opt_r_xyz, opt_r_atoms = self.runner.optimize_minimum(
                 irc_reactant, job_name="reactant", workdir=rp_dir, charge=charge, mult=mult
             )
-            opt_p_out, opt_p_atoms = self.runner.optimize_minimum(
+            opt_p_out, opt_p_xyz, opt_p_atoms = self.runner.optimize_minimum(
                 irc_product, job_name="product", workdir=rp_dir, charge=charge, mult=mult
             )
-            outputs.update({"reactant_out": str(opt_r_out), "product_out": str(opt_p_out)})
+            outputs.update(
+                {
+                    "reactant_out": str(opt_r_out),
+                    "product_out": str(opt_p_out),
+                    "reactant_xyz": str(opt_r_xyz),
+                    "product_xyz": str(opt_p_xyz),
+                }
+            )
         except OrcaJobError as exc:
             _log(f"Endpoint optimization failed: {exc}")
             return _finalize(
