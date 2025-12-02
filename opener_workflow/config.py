@@ -3,51 +3,44 @@ Default configuration values used across the TS pipeline.
 """
 
 from dataclasses import dataclass, field
-from typing import List
+from typing import List, Sequence
+
+
+def _split_keywords(keywords: str | Sequence[str]) -> List[str]:
+    """
+    Normalize keyword configuration into a list of plain tokens without the leading '!'.
+    """
+    if isinstance(keywords, str):
+        keywords = keywords.replace("!", "").split()
+    return [kw.strip() for kw in keywords if kw.strip()]
 
 
 @dataclass
-class OrcaSettings:
-    """Settings for ORCA submissions."""
+class OpiSettings:
+    """Settings for running ORCA through OPI."""
 
-    executable: str = "/inspire/hdd/global_user/libowen-253207030265/soft/orca-6.0.1/orca"
-    #executable: str = "/Users/bwli/soft/orca-6.1.0/orca"
-    #launcher: List[str] = field(default_factory=list)  # Empty for local run
-    launcher: List[str] = field(
-        default_factory=lambda: [
-            "srun",
-            "--exclusive",
-            "--nodes", "1",
-            "--ntasks", "54",  # MPI ranks
-            "--cpus-per-task", "1",  # one core per rank; set OMP_NUM_THREADS=1
-        ]
-    )  # Empty for local run; default uses srun with 54 MPI ranks on one node.
-    ts_keywords: str = "! B3LYP D3BJ def2-SVP OptTS Freq"
-    common_resources: List[str] = field(
-        default_factory=lambda: [
-            "%pal nprocs 54 end",
-            "%maxcore 8000",
-        ]
+    orca_path: str | None = None  # Optional override for the ORCA binary path
+    mpi_path: str | None = None  # Optional OpenMPI path for Runner
+    n_cores: int = 54
+    max_core_mb: int = 8000
+    ts_keywords: List[str] = field(
+        default_factory=lambda: _split_keywords("! B3LYP D3BJ def2-SVP OptTS Freq")
     )
-    geom_block: List[str] = field(default_factory=lambda: ["%geom MaxIter 200 end"])
+    ts_restart_keywords: List[str] = field(
+        default_factory=lambda: _split_keywords("TightSCF XQC")
+    )
     ts_restart_blocks: List[str] = field(
-        default_factory=lambda: [
-            "%scf Convergence Tight end",
-            "%scf XQC true end",
-            "%geom MaxIter 200 ReStart true end",
-            "%method SpecialGridAtoms 1:Grid7 end",
-        ]
+        default_factory=lambda: ["%method SpecialGridAtoms 1:Grid7 end"]
     )
-    irc_keywords: str = "! B3LYP D3BJ def2-SVP IRC"
-    irc_block: str = "\n".join(
-        [
-            "%irc",
-            "  Direction Both",
-            "  MaxIter 50",
-            "end",
-        ]
+    opt_keywords: List[str] = field(
+        default_factory=lambda: _split_keywords("! B3LYP D3BJ def2-SVP Opt Freq")
     )
-    opt_keywords: str = "! B3LYP D3BJ def2-SVP Opt Freq"
+    irc_keywords: List[str] = field(
+        default_factory=lambda: _split_keywords("! B3LYP D3BJ def2-SVP IRC")
+    )
+    geom_maxiter: int = 200
+    irc_maxiter: int = 50
+    max_restarts: int = 2
 
 
 @dataclass
@@ -74,7 +67,7 @@ class FrequencyCheck:
 class PipelineConfig:
     """Aggregate config."""
 
-    orca: OrcaSettings = field(default_factory=OrcaSettings)
+    opi: OpiSettings = field(default_factory=OpiSettings)
     soap: SOAPSettings = field(default_factory=SOAPSettings)
     freq: FrequencyCheck = field(default_factory=FrequencyCheck)
-    max_workers: int = 10  # parallelism for processing multiple TS inputs
+    max_workers: int = 1  # parallelism for processing multiple TS inputs

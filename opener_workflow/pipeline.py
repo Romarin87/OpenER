@@ -24,7 +24,7 @@ from .io_utils import (
     read_orca_input_geometry,
     read_xyz_frames,
 )
-from .orca_runner import OrcaJobError, OrcaRunner
+from .orca_runner import OpiJobError, OpiRunner
 
 logger = logging.getLogger("opener.workflow")
 
@@ -57,10 +57,9 @@ class TransitionStatePipeline:
         self.cfg = config or PipelineConfig()
         self.workdir = ensure_dir(workdir or _timestamped_workdir())
         self.dedup = SOAPDeduplicator(self.cfg.soap, Path(db_path))
-        self.runner = OrcaRunner(self.cfg.orca)
+        self.runner = OpiRunner(self.cfg.opi)
         self.isomeric_smiles = isomeric_smiles
-        # Only fan out multiple workers when an external launcher (e.g., srun) is set.
-        self.max_workers = max(1, self.cfg.max_workers) if self.cfg.orca.launcher else 1
+        self.max_workers = max(1, self.cfg.max_workers)
 
     def _process_atoms(
         self, atoms: Atoms, label: str, charge: int = 0, mult: int = 1
@@ -84,15 +83,15 @@ class TransitionStatePipeline:
 
         try:
             _log("Starting TS optimization")
-            ts_out, ts_xyz, ts_atoms = self.runner.optimize_ts(
+            ts_output, ts_xyz, ts_atoms = self.runner.optimize_ts(
                 atoms, job_name="ts_opt", workdir=ts_dir, charge=charge, mult=mult
             )
-            outputs.update({"ts_out": str(ts_out), "ts_xyz": str(ts_xyz)})
-        except OrcaJobError as exc:
+            outputs.update({"ts_out": str(ts_output.get_outfile()), "ts_xyz": str(ts_xyz)})
+        except OpiJobError as exc:
             _log(f"TS optimization failed: {exc}")
             return _finalize(PipelineResult(label, "failed", f"TS optimization failed: {exc}", outputs))
 
-        freqs = read_frequencies(Path(ts_out))
+        freqs = read_frequencies(ts_output)
         metadata["ts_freqs"] = freqs
         if not is_valid_saddle_point(freqs, self.cfg.freq):
             _log("Failed saddle-point check")
@@ -108,12 +107,12 @@ class TransitionStatePipeline:
 
         try:
             _log("Running IRC")
-            irc_out, back_xyz, forward_xyz, irc_reactant, irc_product = self.runner.run_irc(
+            irc_output, back_xyz, forward_xyz, irc_reactant, irc_product = self.runner.run_irc(
                 ts_atoms, job_name="irc", workdir=irc_dir, charge=charge, mult=mult
             )
             outputs.update(
                 {
-                    "irc_out": str(irc_out),
+                    "irc_out": str(irc_output.get_outfile()),
                     "irc_backward_xyz": str(back_xyz),
                     "irc_forward_xyz": str(forward_xyz),
                 }
@@ -124,28 +123,28 @@ class TransitionStatePipeline:
 
         try:
             _log("Optimizing IRC endpoints")
-            opt_r_out, opt_r_xyz, opt_r_atoms = self.runner.optimize_minimum(
+            opt_r_output, opt_r_xyz, opt_r_atoms = self.runner.optimize_minimum(
                 irc_reactant, job_name="reactant", workdir=rp_dir, charge=charge, mult=mult
             )
-            opt_p_out, opt_p_xyz, opt_p_atoms = self.runner.optimize_minimum(
+            opt_p_output, opt_p_xyz, opt_p_atoms = self.runner.optimize_minimum(
                 irc_product, job_name="product", workdir=rp_dir, charge=charge, mult=mult
             )
             outputs.update(
                 {
-                    "reactant_out": str(opt_r_out),
-                    "product_out": str(opt_p_out),
+                    "reactant_out": str(opt_r_output.get_outfile()),
+                    "product_out": str(opt_p_output.get_outfile()),
                     "reactant_xyz": str(opt_r_xyz),
                     "product_xyz": str(opt_p_xyz),
                 }
             )
-        except OrcaJobError as exc:
+        except OpiJobError as exc:
             _log(f"Endpoint optimization failed: {exc}")
             return _finalize(
                 PipelineResult(label, "failed", f"Endpoint optimization failed: {exc}", outputs, metadata)
             )
 
-        freqs_r = read_frequencies(Path(opt_r_out))
-        freqs_p = read_frequencies(Path(opt_p_out))
+        freqs_r = read_frequencies(opt_r_output)
+        freqs_p = read_frequencies(opt_p_output)
         metadata["reactant_freqs"] = freqs_r
         metadata["product_freqs"] = freqs_p
         if not is_minimum(freqs_r, self.cfg.freq) or not is_minimum(freqs_p, self.cfg.freq):
@@ -218,7 +217,7 @@ def _cli() -> None:
     parser.add_argument(
         "--workdir",
         default=None,
-        help="Working directory for ORCA jobs; default uses runs/<timestamp>",
+        help="Working directory for ORCA/OPI jobs; default uses runs/<timestamp>",
     )
     parser.add_argument("--db", default="data/soap_db.sqlite", help="SQLite database for SOAP fingerprints")
     parser.add_argument("--charge", type=int, default=0, help="Total molecular charge")

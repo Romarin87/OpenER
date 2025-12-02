@@ -7,6 +7,7 @@ from __future__ import annotations
 import re
 from pathlib import Path
 from typing import List, Tuple
+import sys
 
 import io
 from ase import Atoms
@@ -15,9 +16,20 @@ from openbabel import pybel
 
 from .config import FrequencyCheck
 
+_OPI_SRC = Path(__file__).resolve().parents[1] / "opi" / "src"
+if _OPI_SRC.exists() and str(_OPI_SRC) not in sys.path:
+    sys.path.insert(0, str(_OPI_SRC))
 
-def read_frequencies(output_path: Path) -> List[float]:
-    """Parse vibrational frequencies (cm^-1) from an ORCA output."""
+try:  # pragma: no cover - optional dependency made available at runtime
+    from opi.output.core import Output as OpiOutput  # type: ignore
+except Exception:  # noqa: BLE001
+    OpiOutput = None  # type: ignore
+
+
+def read_frequencies(output_path: Path | "OpiOutput") -> List[float]:
+    """Parse vibrational frequencies (cm^-1) from an ORCA output or OPI Output object."""
+    if OpiOutput is not None and isinstance(output_path, OpiOutput):
+        return _frequencies_from_opi(output_path)
     freqs: List[float] = []
     lines = output_path.read_text(errors="ignore").splitlines()
     reading = False
@@ -42,6 +54,26 @@ def read_frequencies(output_path: Path) -> List[float]:
                 continue
             freqs.append(freq)
     return freqs
+
+
+def _frequencies_from_opi(output: "OpiOutput") -> List[float]:
+    """Extract vibrational frequencies from a parsed OPI Output object."""
+    if output.results_properties is None:
+        output.parse(do_create_property_json=True, do_create_gbw_json=False)
+    props = output.results_properties
+    if props is None or not props.geometries:
+        return []
+    thermo = props.geometries[-1].thermochemistry_energies
+    if not thermo:
+        return []
+    freq_entries = thermo[-1].freq or []
+    flattened: List[float] = []
+    for entry in freq_entries:
+        if isinstance(entry, list) and entry:
+            flattened.append(float(entry[0]))
+        elif isinstance(entry, (float, int)):
+            flattened.append(float(entry))
+    return flattened
 
 
 def is_valid_saddle_point(freqs: List[float], cfg: FrequencyCheck) -> bool:
