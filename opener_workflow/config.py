@@ -13,13 +13,15 @@ class OrcaSettings:
     executable: str = "/inspire/hdd/global_user/libowen-253207030265/soft/orca-6.0.1/orca"
     #executable: str = "/Users/bwli/soft/orca-6.1.0/orca"
     #launcher: List[str] = field(default_factory=list)  # Empty for local run
-    launcher: List[str] = field(default_factory=lambda: [
-            "srun", "--exclusive",
+    launcher: List[str] = field(
+        default_factory=lambda: [
+            "srun",
+            "--exclusive",
             "--nodes", "1",
-            "--ntasks", "1",
-            "--cpus-per-task", "54",
+            "--ntasks", "54",  # MPI ranks
+            "--cpus-per-task", "1",  # one core per rank; set OMP_NUM_THREADS=1
         ]
-    )  # Empty for local run; this default uses srun on a single 55-core node.
+    )  # Empty for local run; default uses srun with 54 MPI ranks on one node.
     ts_keywords: str = "! B3LYP D3BJ def2-SVP OptTS Freq"
     common_resources: List[str] = field(
         default_factory=lambda: [
