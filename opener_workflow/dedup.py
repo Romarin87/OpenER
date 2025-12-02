@@ -126,13 +126,13 @@ class SOAPDeduplicator:
                     ),
                 )
 
-    def check_duplicate(self, atoms: Atoms) -> Tuple[bool, Optional[str]]:
-        """Return (is_duplicate, matched_source_path)."""
+    def check_duplicate(self, atoms: Atoms) -> Tuple[bool, Optional[str], Optional[float]]:
+        """Return (is_duplicate, matched_source_path, best_similarity)."""
         comp = composition_key(atoms)
         vec = self.fingerprint(atoms)
         existing = self._load_records(comp)
         if not existing:
-            return False, None
+            return False, None, None
 
         matrix = np.vstack([r["vector"] for r in existing])
         # Laplacian average kernel for similarity scoring
@@ -141,8 +141,8 @@ class SOAPDeduplicator:
         best_idx = int(np.nanargmax(sims))
         best_sim = sims[best_idx]
         if best_sim > self.settings.threshold_similarity:
-            return True, existing[best_idx]["source"]
-        return False, None
+            return True, existing[best_idx]["source"], float(best_sim)
+        return False, existing[best_idx]["source"], float(best_sim)
 
     def register(self, atoms: Atoms, source: Optional[str] = None, metadata: Optional[Dict] = None) -> None:
         """Persist a new fingerprint after successful verification."""

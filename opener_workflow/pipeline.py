@@ -7,6 +7,7 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import time
 from dataclasses import asdict, dataclass, field
 from datetime import datetime
 from pathlib import Path
@@ -82,11 +83,13 @@ class TransitionStatePipeline:
             return res
 
         try:
+            ts_start = time.perf_counter()
             _log("Starting TS optimization")
             ts_output, ts_xyz, ts_atoms = self.runner.optimize_ts(
                 atoms, job_name="ts_opt", workdir=ts_dir, charge=charge, mult=mult
             )
             outputs.update({"ts_out": str(ts_output.get_outfile()), "ts_xyz": str(ts_xyz)})
+            _log(f"TS optimization completed in {time.perf_counter() - ts_start:.1f}s")
         except OpiJobError as exc:
             _log(f"TS optimization failed: {exc}")
             return _finalize(PipelineResult(label, "failed", f"TS optimization failed: {exc}", outputs))
@@ -99,13 +102,22 @@ class TransitionStatePipeline:
                 PipelineResult(label, "not_saddle", "Failed saddle-point check", outputs, metadata)
             )
 
-        is_dup, match = self.dedup.check_duplicate(ts_atoms)
+        dedup_start = time.perf_counter()
+        is_dup, match, best_sim = self.dedup.check_duplicate(ts_atoms)
+        _log(
+            f"SOAP dedup check in {time.perf_counter() - dedup_start:.2f}s; "
+            f"max similarity {best_sim:.4f}" if best_sim is not None else "SOAP dedup check completed"
+        )
+        metadata["soap_best_similarity"] = best_sim
         if is_dup:
-            msg = f"Duplicate of {match}" if match else "Duplicate structure"
+            msg = f"Duplicate of {match} (sim={best_sim:.4f})" if match and best_sim is not None else "Duplicate structure"
             _log(msg)
             return _finalize(PipelineResult(label, "duplicate", msg, outputs, metadata))
+        if best_sim is not None:
+            _log(f"SOAP max similarity {best_sim:.4f}" + (f" vs {match}" if match else ""))
 
         try:
+            irc_start = time.perf_counter()
             _log("Running IRC")
             irc_output, back_xyz, forward_xyz, irc_reactant, irc_product = self.runner.run_irc(
                 ts_atoms, job_name="irc", workdir=irc_dir, charge=charge, mult=mult
@@ -117,11 +129,13 @@ class TransitionStatePipeline:
                     "irc_forward_xyz": str(forward_xyz),
                 }
             )
+            _log(f"IRC completed in {time.perf_counter() - irc_start:.1f}s")
         except Exception as exc:  # noqa: BLE001
             _log(f"IRC failed: {exc}")
             return _finalize(PipelineResult(label, "failed", f"IRC failed: {exc}", outputs, metadata))
 
         try:
+            opt_start = time.perf_counter()
             _log("Optimizing IRC endpoints")
             opt_r_output, opt_r_xyz, opt_r_atoms = self.runner.optimize_minimum(
                 irc_reactant, job_name="reactant", workdir=rp_dir, charge=charge, mult=mult
@@ -137,6 +151,7 @@ class TransitionStatePipeline:
                     "product_xyz": str(opt_p_xyz),
                 }
             )
+            _log(f"Endpoint optimizations completed in {time.perf_counter() - opt_start:.1f}s")
         except OpiJobError as exc:
             _log(f"Endpoint optimization failed: {exc}")
             return _finalize(
