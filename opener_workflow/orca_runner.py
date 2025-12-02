@@ -61,6 +61,22 @@ def _geom_block_text(maxiter: int, restart: bool) -> str:
     return "\n".join(lines)
 
 
+def _geometry_converged_from_outfile(outfile: Path) -> bool:
+    """
+    Fallback convergence detection by scanning the ORCA .out file when OPI parsing is incomplete.
+    """
+    try:
+        text = Path(outfile).read_text(errors="ignore").upper()
+    except Exception:
+        return False
+    markers = (
+        "GEOMETRY OPTIMIZATION CONVERGED",
+        "THE OPTIMIZATION HAS CONVERGED",
+        "OPTIMIZATION CONVERGED",
+    )
+    return any(marker in text for marker in markers)
+
+
 class OpiRunner:
     """Run ORCA calculations via the OPI Calculator wrapper."""
 
@@ -205,8 +221,20 @@ class OpiRunner:
                 charge=charge,
                 mult=mult,
             )
-            last_outfile = output.get_outfile()
-            if output.geometry_optimization_converged():
+            try:
+                last_outfile = Path(output.get_outfile())
+            except Exception:
+                last_outfile = Path(workdir) / f"{job_label}.out"
+
+            converged = False
+            try:
+                converged = bool(output.geometry_optimization_converged())
+            except Exception:
+                converged = False
+            if not converged and last_outfile.exists():
+                converged = _geometry_converged_from_outfile(last_outfile)
+
+            if converged:
                 xyz_path, final_atoms = self._final_atoms_from_output(output, workdir, job_label)
                 return output, xyz_path, final_atoms
 

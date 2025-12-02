@@ -47,12 +47,12 @@ class OpiSettings:
 class SOAPSettings:
     """Parameters for SOAP descriptor generation."""
 
-    r_cut: float = 6.0
-    n_max: int = 8
-    l_max: int = 6
-    average_mode: str = "outer"
-    kernel_gamma: float = 1.0
-    threshold_similarity: float = 0.999
+    r_cut: float = 10.0
+    n_max: int = 6
+    l_max: int = 4
+    average_mode: str = "off"  # per-atom descriptors
+    kernel_gamma: float | None = None  # if None, set to 1 / feature_dim
+    threshold_similarity: float = 0.9
 
 
 @dataclass
