@@ -33,9 +33,8 @@ python -m opener_workflow.pipeline \
 ## 关键文件
 - `opener_workflow/config.py`：ORCA 关键字、SOAP 阈值、虚频判据。
 - `opener_workflow/orca_runner.py`：ORCA 提交与自动重启，直接读取 ORCA 输出的 xyz（包括 TS、IRC 端点、端点优化）。
-- `opener_workflow/analysis.py`：频率解析与鞍点/极小点判定。
+- `opener_workflow/analysis.py`：频率解析、鞍点/极小点判定，以及 SMILES 生成/对比。
 - `opener_workflow/dedup.py`：SOAP 指纹计算、SQLite 存储与重复检测。
-- `opener_workflow/smiles_check.py`：Canonical SMILES 生成与匹配。
 - `opener_workflow/pipeline.py`：整体流程（TS 优化 → 验证 → 去重 → IRC → 端点优化 → SMILES 校验）及 CLI。
 
 ## 说明

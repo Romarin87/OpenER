@@ -15,7 +15,7 @@ from typing import Dict, List, Optional
 from ase import Atoms
 from tqdm import tqdm
 
-from .analysis import is_minimum, is_valid_saddle_point, read_frequencies
+from .analysis import compare_endpoints, is_minimum, is_valid_saddle_point, read_frequencies
 from .config import PipelineConfig
 from .dedup import SOAPDeduplicator
 from .io_utils import (
@@ -24,7 +24,6 @@ from .io_utils import (
     read_xyz_frames,
 )
 from .orca_runner import OrcaJobError, OrcaRunner
-from .smiles_check import compare_endpoints
 
 logger = logging.getLogger("opener.workflow")
 
