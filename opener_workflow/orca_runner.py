@@ -25,6 +25,7 @@ def run_orca_input(
     job_name: str,
     workdir: Path,
     executable: str,
+    launcher: Sequence[str] | None = None,
 ) -> Path:
     """Write an ORCA input and execute it, returning the output path."""
     ensure_dir(workdir)
@@ -33,8 +34,10 @@ def run_orca_input(
     inp.write_text(input_text)
     try:
         with open(out, "w") as fout:
+            cmd = list(launcher or [])
+            cmd.extend([executable, inp.name])
             subprocess.run(
-                [executable, inp.name],
+                cmd,
                 cwd=workdir,
                 check=True,
                 stdout=fout,
@@ -149,6 +152,7 @@ class OrcaRunner:
             job_name=job_name,
             workdir=workdir,
             executable=self.settings.executable,
+            launcher=self.settings.launcher,
         )
 
     def optimize_ts(

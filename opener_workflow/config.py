@@ -12,6 +12,7 @@ class OrcaSettings:
 
     #executable: str = "/inspire/hdd/global_user/libowen-253207030265/soft/orca-6.0.1/orca"
     executable: str = "/Users/bwli/soft/orca-6.1.0/orca"
+    launcher: List[str] = field(default_factory=list)  # e.g., ["srun", "-n", "1", "-c", "55"]
     ts_keywords: str = "! B3LYP D3BJ def2-SVP OptTS Freq"
     common_resources: List[str] = field(
         default_factory=lambda: [

@@ -7,6 +7,7 @@ from __future__ import annotations
 import json
 import sqlite3
 from collections import Counter
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
@@ -31,8 +32,26 @@ class SOAPDeduplicator:
     def __init__(self, settings: SOAPSettings, db_path: Path):
         self.settings = settings
         self.db_path = Path(db_path)
+        self._lock_path = self.db_path.with_suffix(self.db_path.suffix + ".lock")
         self._init_db()
         self.soap_cache: Dict[str, SOAP] = {}
+
+    @contextmanager
+    def _db_lock(self):
+        """Simple file lock to serialize DB access across processes."""
+        try:
+            import fcntl
+        except ImportError:
+            # Non-POSIX; no locking available, yield directly.
+            yield
+            return
+        self._lock_path.parent.mkdir(parents=True, exist_ok=True)
+        with open(self._lock_path, "a+") as lock_fh:
+            fcntl.flock(lock_fh, fcntl.LOCK_EX)
+            try:
+                yield
+            finally:
+                fcntl.flock(lock_fh, fcntl.LOCK_UN)
 
     def _init_db(self) -> None:
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
@@ -73,12 +92,13 @@ class SOAPDeduplicator:
         return np.array(vec, dtype=np.float32).ravel()
 
     def _load_records(self, composition: str) -> List[Dict]:
-        with sqlite3.connect(self.db_path) as conn:
-            cur = conn.execute(
-                "SELECT id, dim, fingerprint, source_path, metadata FROM soap_entries WHERE composition=?",
-                (composition,),
-            )
-            rows = cur.fetchall()
+        with self._db_lock():
+            with sqlite3.connect(self.db_path) as conn:
+                cur = conn.execute(
+                    "SELECT id, dim, fingerprint, source_path, metadata FROM soap_entries WHERE composition=?",
+                    (composition,),
+                )
+                rows = cur.fetchall()
         records = []
         for rid, dim, blob, source, meta_json in rows:
             vec = np.frombuffer(blob, dtype=np.float32, count=dim)
@@ -89,18 +109,19 @@ class SOAPDeduplicator:
     def _store_record(
         self, composition: str, vec: np.ndarray, source: Optional[str], metadata: Dict
     ) -> None:
-        with sqlite3.connect(self.db_path) as conn:
-            conn.execute(
-                "INSERT INTO soap_entries(composition, dim, fingerprint, source_path, metadata) "
-                "VALUES (?, ?, ?, ?, ?)",
-                (
-                    composition,
-                    int(vec.size),
-                    sqlite3.Binary(vec.astype(np.float32).tobytes()),
-                    source,
-                    json.dumps(metadata),
-                ),
-            )
+        with self._db_lock():
+            with sqlite3.connect(self.db_path) as conn:
+                conn.execute(
+                    "INSERT INTO soap_entries(composition, dim, fingerprint, source_path, metadata) "
+                    "VALUES (?, ?, ?, ?, ?)",
+                    (
+                        composition,
+                        int(vec.size),
+                        sqlite3.Binary(vec.astype(np.float32).tobytes()),
+                        source,
+                        json.dumps(metadata),
+                    ),
+                )
 
     def check_duplicate(self, atoms: Atoms) -> Tuple[bool, Optional[str]]:
         """Return (is_duplicate, matched_source_path)."""
