@@ -10,6 +10,7 @@ from collections import Counter
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
+import threading
 
 import numpy as np
 from ase import Atoms
@@ -33,6 +34,7 @@ class SOAPDeduplicator:
         self.settings = settings
         self.db_path = Path(db_path)
         self._lock_path = self.db_path.with_suffix(self.db_path.suffix + ".lock")
+        self._soap_lock = threading.Lock()
         self._init_db()
         self.soap_cache: Dict[str, SOAP] = {}
 
@@ -72,18 +74,19 @@ class SOAPDeduplicator:
 
     def _descriptor(self, atoms: Atoms) -> SOAP:
         comp = composition_key(atoms)
-        if comp in self.soap_cache:
-            return self.soap_cache[comp]
-        species = sorted(set(atoms.get_chemical_symbols()))
-        soap = SOAP(
-            species=species,
-            r_cut=self.settings.r_cut,
-            n_max=self.settings.n_max,
-            l_max=self.settings.l_max,
-            average=self.settings.average_mode,
-        )
-        self.soap_cache[comp] = soap
-        return soap
+        with self._soap_lock:
+            if comp in self.soap_cache:
+                return self.soap_cache[comp]
+            species = sorted(set(atoms.get_chemical_symbols()))
+            soap = SOAP(
+                species=species,
+                r_cut=self.settings.r_cut,
+                n_max=self.settings.n_max,
+                l_max=self.settings.l_max,
+                average=self.settings.average_mode,
+            )
+            self.soap_cache[comp] = soap
+            return soap
 
     def fingerprint(self, atoms: Atoms) -> np.ndarray:
         soap = self._descriptor(atoms)

@@ -10,14 +10,21 @@ from typing import List
 class OrcaSettings:
     """Settings for ORCA submissions."""
 
-    #executable: str = "/inspire/hdd/global_user/libowen-253207030265/soft/orca-6.0.1/orca"
-    executable: str = "/Users/bwli/soft/orca-6.1.0/orca"
-    launcher: List[str] = field(default_factory=list)  # e.g., ["srun", "-n", "1", "-c", "55"]
+    executable: str = "/inspire/hdd/global_user/libowen-253207030265/soft/orca-6.0.1/orca"
+    #executable: str = "/Users/bwli/soft/orca-6.1.0/orca"
+    #launcher: List[str] = field(default_factory=list)  # Empty for local run
+    launcher: List[str] = field(default_factory=lambda: [
+            "srun", "--exclusive",
+            "--nodes", "1",
+            "--ntasks", "1",
+            "--cpus-per-task", "54",
+        ]
+    )  # Empty for local run; this default uses srun on a single 55-core node.
     ts_keywords: str = "! B3LYP D3BJ def2-SVP OptTS Freq"
     common_resources: List[str] = field(
         default_factory=lambda: [
-            "%pal nprocs 4 end",
-            "%maxcore 2000",
+            "%pal nprocs 54 end",
+            "%maxcore 8000",
         ]
     )
     geom_block: List[str] = field(default_factory=lambda: ["%geom MaxIter 200 end"])
@@ -68,3 +75,4 @@ class PipelineConfig:
     orca: OrcaSettings = field(default_factory=OrcaSettings)
     soap: SOAPSettings = field(default_factory=SOAPSettings)
     freq: FrequencyCheck = field(default_factory=FrequencyCheck)
+    max_workers: int = 10  # parallelism for processing multiple TS inputs

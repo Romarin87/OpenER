@@ -9,6 +9,7 @@
 - IRC 路径：`! B3LYP D3BJ def2-SVP IRC`，Direction Both，MaxIter 50（可在 `config.py` 调整 StepSize/备用算法块）；流程直接使用 ORCA 写出的 `_IRC_B.xyz` / `_IRC_F.xyz` 作为反应物/生成物端点，缺失则视为 IRC 失败。
 - 端点最优化：与 TS 同级别 `! B3LYP D3BJ def2-SVP Opt Freq`，确认无虚频。
 - Canonical SMILES 对比：OpenBabel 生成 SMILES，验证 IRC 端点与最优化结构拓扑一致。
+- 并行：仅在设置了 `OrcaSettings.launcher`（如 `srun`）时生效，可用 `PipelineConfig.max_workers` 控制并发处理多个 TS 输入。
 
 ## 快速开始
 ```bash

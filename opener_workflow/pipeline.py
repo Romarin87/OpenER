@@ -11,6 +11,7 @@ from dataclasses import asdict, dataclass, field
 from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Optional
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from ase import Atoms
 from tqdm import tqdm
@@ -58,6 +59,8 @@ class TransitionStatePipeline:
         self.dedup = SOAPDeduplicator(self.cfg.soap, Path(db_path))
         self.runner = OrcaRunner(self.cfg.orca)
         self.isomeric_smiles = isomeric_smiles
+        # Only fan out multiple workers when an external launcher (e.g., srun) is set.
+        self.max_workers = max(1, self.cfg.max_workers) if self.cfg.orca.launcher else 1
 
     def _process_atoms(
         self, atoms: Atoms, label: str, charge: int = 0, mult: int = 1
@@ -181,21 +184,31 @@ class TransitionStatePipeline:
     def run_directory(self, ts_dir: str | Path, charge: int = 0, mult: int = 1) -> List[PipelineResult]:
         ts_dir = Path(ts_dir)
         inputs = sorted(list(ts_dir.glob("*.xyz")) + list(ts_dir.glob("*.inp")))
+        tasks: List[tuple[str, Atoms]] = []
         results: List[PipelineResult] = []
-        for path in tqdm(inputs, desc="TS structures"):
+
+        for path in inputs:
             try:
-                if path.suffix == ".xyz":
-                    atoms_list = read_xyz_frames(path)
-                else:
-                    atoms_list = [read_orca_input_geometry(path)]
+                atoms_list = read_xyz_frames(path) if path.suffix == ".xyz" else [read_orca_input_geometry(path)]
             except Exception as exc:  # noqa: BLE001
                 results.append(PipelineResult(path.stem, "failed", f"Input parse error: {exc}"))
                 continue
-
             for idx, atoms in enumerate(atoms_list):
                 label = f"{path.stem}_frame{idx}"
-                result = self._process_atoms(atoms, label, charge=charge, mult=mult)
-                results.append(result)
+                tasks.append((label, atoms))
+
+        if self.max_workers <= 1 or len(tasks) <= 1:
+            for label, atoms in tqdm(tasks, desc="TS structures"):
+                results.append(self._process_atoms(atoms, label, charge=charge, mult=mult))
+            return results
+
+        with ThreadPoolExecutor(max_workers=self.max_workers) as executor:
+            future_map = {
+                executor.submit(self._process_atoms, atoms, label, charge=charge, mult=mult): label
+                for label, atoms in tasks
+            }
+            for fut in tqdm(as_completed(future_map), total=len(future_map), desc="TS structures"):
+                results.append(fut.result())
         return results
 
 
