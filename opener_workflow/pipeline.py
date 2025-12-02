@@ -19,7 +19,7 @@ from tqdm import tqdm
 
 from .analysis import compare_endpoints, is_minimum, is_valid_saddle_point, read_frequencies
 from .config import PipelineConfig
-from .dedup import SOAPDeduplicator
+from .dedup import SOAPDeduplicator, composition_key
 from .io_utils import (
     ensure_dir,
     read_orca_input_geometry,
@@ -103,11 +103,29 @@ class TransitionStatePipeline:
             )
 
         dedup_start = time.perf_counter()
-        is_dup, match, best_sim = self.dedup.check_duplicate(ts_atoms)
-        _log(
-            f"SOAP dedup check in {time.perf_counter() - dedup_start:.2f}s; "
-            f"max similarity {best_sim:.4f}" if best_sim is not None else "SOAP dedup check completed"
-        )
+        is_dup, match, best_sim, existing_count, sim_debug = self.dedup.check_duplicate(ts_atoms)
+        comp = composition_key(ts_atoms)
+        if match == "__incompatible__":
+            msg = (
+                "SOAP fingerprint dimension mismatch with DB; "
+                "current settings appear incompatible with existing entries. "
+                "Skipping registration to avoid corruption."
+            )
+            _log(msg)
+            return _finalize(PipelineResult(label, "failed", msg, outputs, metadata))
+        if best_sim is not None:
+            _log(
+                f"SOAP dedup check in {time.perf_counter() - dedup_start:.2f}s; "
+                f"comp={comp}, existing={existing_count}, max similarity {best_sim:.4f}, "
+                f"threshold {self.cfg.soap.threshold_similarity}"
+                + (f" vs {match}" if match else "")
+            )
+        else:
+            _log(
+                f"SOAP dedup check in {time.perf_counter() - dedup_start:.2f}s; "
+                f"comp={comp}, existing={existing_count}, similarity unavailable"
+                + (f" ({sim_debug})" if sim_debug else "")
+            )
         metadata["soap_best_similarity"] = best_sim
         if is_dup:
             msg = f"Duplicate of {match} (sim={best_sim:.4f})" if match and best_sim is not None else "Duplicate structure"
@@ -191,8 +209,8 @@ class TransitionStatePipeline:
                 PipelineResult(label, "failed", "SMILES mismatch between IRC and minima", outputs, metadata)
             )
 
-        self.dedup.register(ts_atoms, source=str(job_dir), metadata=metadata)
-        _log("Pipeline completed successfully")
+        stored_total = self.dedup.register(ts_atoms, source=str(job_dir), metadata=metadata)
+        _log(f"Pipeline completed successfully; stored SOAP entry for comp={comp} (total {stored_total})")
         return _finalize(PipelineResult(label, "success", "Completed TS pipeline", outputs, metadata))
 
     def run_directory(self, ts_dir: str | Path, charge: int = 0, mult: int = 1) -> List[PipelineResult]:

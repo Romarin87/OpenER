@@ -4,6 +4,7 @@ OPI-backed helpers to run ORCA calculations used in the workflow.
 
 from __future__ import annotations
 
+import logging
 import os
 import sys
 from pathlib import Path
@@ -24,6 +25,8 @@ from opi.input.arbitrary_string import ArbitraryStringPos  # type: ignore  # noq
 from opi.input.blocks.block_irc import BlockIrc  # type: ignore  # noqa: E402
 from opi.input.structures import Structure  # type: ignore  # noqa: E402
 from opi.output.core import Output  # type: ignore  # noqa: E402
+
+logger = logging.getLogger("opener.orca_runner")
 
 
 class OpiJobError(RuntimeError):
@@ -106,12 +109,8 @@ class OpiRunner:
             calc.write_input()
             ok = calc.run()
             output = calc.get_output()
-            # Ensure JSON files exist so we can parse properties like frequencies.
-            try:
-                output.parse(do_create_property_json=True, do_create_gbw_json=False)
-            except FileNotFoundError:
-                output.parse(do_create_property_json=True, do_create_gbw_json=True)
         except Exception as exc:  # noqa: BLE001
+            # Continue to surface failures where ORCA itself did not finish.
             raise OpiJobError(f"Failed to run ORCA job {job_name}: {exc}") from exc
 
         try:
@@ -120,7 +119,31 @@ class OpiRunner:
             outfile = workdir / f"{job_name}.out"
 
         if not ok or not output.terminated_normally():
-            raise OpiJobError(f"ORCA job {job_name} failed; inspect {outfile}")
+            raise OpiJobError(f"ORCA job {job_name} failed; inspect {Path(outfile).name}")
+
+        # Try to ensure JSONs exist for downstream parsing; tolerate failures.
+        try:
+            if output.results_properties is None:
+                output.parse(do_create_property_json=True, do_create_gbw_json=False)
+        except FileNotFoundError:
+            try:
+                output.parse(do_create_property_json=True, do_create_gbw_json=True)
+            except Exception as exc:  # noqa: BLE001
+                short_path = Path(outfile).name
+                logger.warning(
+                    "Parsing output for %s failed (%s); falling back to .out (%s)",
+                    job_name,
+                    exc,
+                    short_path,
+                )
+        except Exception as exc:  # noqa: BLE001
+            short_path = Path(outfile).name
+            logger.warning(
+                "Parsing output for %s failed (%s); falling back to .out (%s)",
+                job_name,
+                exc,
+                short_path,
+            )
         return output
 
     def _final_atoms_from_output(self, output: Output, workdir: Path, job_label: str) -> tuple[Path, Atoms]:
@@ -191,7 +214,7 @@ class OpiRunner:
             attempt += 1
 
         raise OpiJobError(
-            f"TS optimization failed after {self.settings.max_restarts} restarts; see {last_outfile}"
+            f"TS optimization failed after {self.settings.max_restarts} restarts; see {Path(last_outfile).name if last_outfile else 'output'}"
         )
 
     def run_irc(
@@ -218,7 +241,9 @@ class OpiRunner:
         back_xyz = workdir / f"{job_name}_IRC_B.xyz"
         forward_xyz = workdir / f"{job_name}_IRC_F.xyz"
         if not back_xyz.exists() or not forward_xyz.exists():
-            raise OpiJobError(f"IRC endpoint xyz files not found: {back_xyz} and/or {forward_xyz}")
+            raise OpiJobError(
+                f"IRC endpoint xyz files not found: {back_xyz.name} and/or {forward_xyz.name}"
+            )
         back_atoms = read_last_xyz_frame(back_xyz)
         forward_atoms = read_last_xyz_frame(forward_xyz)
         return output, back_xyz, forward_xyz, back_atoms, forward_atoms
@@ -243,7 +268,11 @@ class OpiRunner:
             mult=mult,
         )
         if not output.geometry_optimization_converged():
-            raise OpiJobError(f"Minima optimization failed; inspect {output.get_outfile()}")
+            try:
+                out_name = Path(output.get_outfile()).name
+            except Exception:
+                out_name = f"{job_name}.out"
+            raise OpiJobError(f"Minima optimization failed; inspect {out_name}")
         xyz_path, final_atoms = self._final_atoms_from_output(output, workdir, job_name)
         return output, xyz_path, final_atoms
 

@@ -126,27 +126,41 @@ class SOAPDeduplicator:
                     ),
                 )
 
-    def check_duplicate(self, atoms: Atoms) -> Tuple[bool, Optional[str], Optional[float]]:
-        """Return (is_duplicate, matched_source_path, best_similarity)."""
+    def check_duplicate(
+        self, atoms: Atoms
+    ) -> Tuple[bool, Optional[str], Optional[float], int, Optional[str]]:
+        """Return (is_duplicate, matched_source_path, best_similarity, existing_count, debug_message)."""
         comp = composition_key(atoms)
-        vec = self.fingerprint(atoms)
+        vec = self.fingerprint(atoms).ravel()
         existing = self._load_records(comp)
+        existing_count = len(existing)
         if not existing:
-            return False, None, None
+            return False, None, None, existing_count, None
 
-        matrix = np.vstack([r["vector"] for r in existing])
+        existing_vecs = [r["vector"].ravel() for r in existing]
+        # Dimension mismatch guard: if vectors differ in length, skip similarity to avoid crashes.
+        if any(v.shape != vec.shape for v in existing_vecs):
+            return False, "__incompatible__", None, existing_count, "fingerprint dimension mismatch"
+
+        matrix = np.atleast_2d(np.vstack(existing_vecs))
+        vec_2d = vec.reshape(1, -1)
+
         # Laplacian average kernel for similarity scoring
         kernel = AverageKernel(metric="laplacian", gamma=self.settings.kernel_gamma)
-        sims = kernel.create(vec[None, :], matrix)[0]
+        try:
+            sims = kernel.create(vec_2d, matrix)[0]
+        except Exception as exc:
+            return False, None, None, existing_count, f"similarity computation failed: {exc}"
         best_idx = int(np.nanargmax(sims))
         best_sim = sims[best_idx]
         if best_sim > self.settings.threshold_similarity:
-            return True, existing[best_idx]["source"], float(best_sim)
-        return False, existing[best_idx]["source"], float(best_sim)
+            return True, existing[best_idx]["source"], float(best_sim), existing_count, None
+        return False, existing[best_idx]["source"], float(best_sim), existing_count, None
 
-    def register(self, atoms: Atoms, source: Optional[str] = None, metadata: Optional[Dict] = None) -> None:
-        """Persist a new fingerprint after successful verification."""
+    def register(self, atoms: Atoms, source: Optional[str] = None, metadata: Optional[Dict] = None) -> int:
+        """Persist a new fingerprint after successful verification. Returns total count for this composition."""
         meta = metadata or {}
         comp = composition_key(atoms)
         vec = self.fingerprint(atoms)
         self._store_record(comp, vec, source, meta)
+        return len(self._load_records(comp))

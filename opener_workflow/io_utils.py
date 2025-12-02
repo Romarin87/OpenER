@@ -101,7 +101,14 @@ def structure_to_atoms(structure: Structure) -> Atoms:
         coord_obj = getattr(atom, "coordinates", None)
         if coord_obj is None:
             raise ValueError("Structure atom missing coordinates")
-        coords.append(coord_obj.to_list())
+        # Prefer direct array access to avoid truth-value issues in opi Coordinates.to_list
+        arr = getattr(coord_obj, "coordinates", None)
+        if arr is not None:
+            coords.append(list(arr))
+        elif hasattr(coord_obj, "to_list"):
+            coords.append(coord_obj.to_list())
+        else:
+            raise ValueError("Unsupported coordinate object on atom")
     atoms = Atoms(symbols=symbols, positions=coords)
     atoms.info["charge"] = getattr(structure, "charge", 0)
     atoms.info["multiplicity"] = getattr(structure, "multiplicity", 1)

@@ -29,9 +29,19 @@ except Exception:  # noqa: BLE001
 def read_frequencies(output_path: Path | "OpiOutput") -> List[float]:
     """Parse vibrational frequencies (cm^-1) from an ORCA output or OPI Output object."""
     if OpiOutput is not None and isinstance(output_path, OpiOutput):
-        return _frequencies_from_opi(output_path)
+        try:
+            return _frequencies_from_opi(output_path)
+        except Exception:
+            try:
+                return _read_freqs_from_text(Path(output_path.get_outfile()))
+            except Exception:
+                return []
+    return _read_freqs_from_text(Path(output_path))
+
+
+def _read_freqs_from_text(path: Path) -> List[float]:
     freqs: List[float] = []
-    lines = output_path.read_text(errors="ignore").splitlines()
+    lines = path.read_text(errors="ignore").splitlines()
     reading = False
     for line in lines:
         if "VIBRATIONAL FREQUENCIES" in line.upper():
