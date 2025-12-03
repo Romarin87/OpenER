@@ -7,7 +7,7 @@ from __future__ import annotations
 import os
 import sys
 from pathlib import Path
-from typing import Iterable, List, Sequence
+from typing import Iterable, List, Sequence, Optional
 
 from ase import Atoms
 from ase.io import read, write
@@ -34,9 +34,12 @@ def read_xyz_frames(path: str | os.PathLike) -> List[Atoms]:
     return atoms_list
 
 
-def write_xyz(atoms: Atoms, path: str | os.PathLike) -> None:
-    """Write a single geometry to xyz."""
-    write(path, atoms, format="xyz")
+def write_xyz(atoms: Atoms, path: str | os.PathLike, comment: Optional[str] = None) -> None:
+    """Write a single geometry to xyz, with optional comment line."""
+    if comment:
+        write(path, atoms, format="xyz", comment=comment)
+    else:
+        write(path, atoms, format="xyz")
 
 
 def read_last_xyz_frame(path: str | os.PathLike) -> Atoms:

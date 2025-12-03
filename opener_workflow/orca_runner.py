@@ -52,12 +52,9 @@ def _normalize_keywords(keywords: Sequence[str] | str) -> List[str]:
     return tokens
 
 
-def _geom_block_text(maxiter: int, restart: bool) -> str:
-    """Build a %geom block text with optional restart flag."""
-    lines = ["%geom", f"  MaxIter {maxiter}"]
-    if restart:
-        lines.append("  ReStart true")
-    lines.append("end")
+def _geom_block_text(maxiter: int) -> str:
+    """Build a %geom block text."""
+    lines = ["%geom", f"  MaxIter {maxiter}", "end"]
     return "\n".join(lines)
 
 
@@ -112,7 +109,8 @@ class OpiRunner:
         calc.input.ncores = self.settings.n_cores
         calc.input.memory = self.settings.max_core_mb
 
-        for kw in _normalize_keywords(keywords):
+        full_keywords = list(self.settings.method_keywords) + list(keywords)
+        for kw in _normalize_keywords(full_keywords):
             calc.input.add_simple_keywords(kw)
 
         for block_str in block_strings or ():
@@ -144,22 +142,12 @@ class OpiRunner:
         except FileNotFoundError:
             try:
                 output.parse(do_create_property_json=True, do_create_gbw_json=True)
-            except Exception as exc:  # noqa: BLE001
+            except Exception:  # noqa: BLE001
                 short_path = Path(outfile).name
-                logger.warning(
-                    "Parsing output for %s failed (%s); falling back to .out (%s)",
-                    job_name,
-                    exc,
-                    short_path,
-                )
-        except Exception as exc:  # noqa: BLE001
+                logger.warning("Parse failed for %s; using .out (%s)", job_name, short_path)
+        except Exception:  # noqa: BLE001
             short_path = Path(outfile).name
-            logger.warning(
-                "Parsing output for %s failed (%s); falling back to .out (%s)",
-                job_name,
-                exc,
-                short_path,
-            )
+            logger.warning("Parse failed for %s; using .out (%s)", job_name, short_path)
         return output
 
     def _final_atoms_from_output(self, output: Output, workdir: Path, job_label: str) -> tuple[Path, Atoms]:
@@ -175,16 +163,6 @@ class OpiRunner:
             write_xyz(atoms, xyz_path)
         return xyz_path, atoms
 
-    def _restart_geometry(self, output: Output, workdir: Path, job_label: str, fallback: Atoms) -> Atoms:
-        """Pick the best available geometry to seed a restart."""
-        structure = output.get_structure()
-        if structure is not None:
-            return structure_to_atoms(structure)
-        xyz_path = Path(workdir) / f"{job_label}.xyz"
-        if xyz_path.exists():
-            return read_last_xyz_frame(xyz_path)
-        return fallback
-
     def optimize_ts(
         self,
         atoms: Atoms,
@@ -199,21 +177,15 @@ class OpiRunner:
         Returns the Output object, xyz path, and the final geometry.
         """
         attempt = 0
-        current_atoms = atoms
         last_outfile: Path | None = None
         while attempt <= self.settings.max_restarts:
-            restart = attempt > 0
             suffix = "" if attempt == 0 else f"_retry{attempt}"
             job_label = job_name + suffix
-            block_strings = [_geom_block_text(self.settings.geom_maxiter, restart=restart)]
-            if restart:
-                block_strings.extend(self.settings.ts_restart_blocks)
-                keywords = list(self.settings.ts_keywords) + list(self.settings.ts_restart_keywords)
-            else:
-                keywords = self.settings.ts_keywords
+            block_strings = [_geom_block_text(self.settings.geom_maxiter)]
+            keywords = self.settings.ts_keywords
 
             output = self._run_calculation(
-                current_atoms,
+                atoms,
                 job_label,
                 workdir,
                 keywords,
@@ -238,7 +210,6 @@ class OpiRunner:
                 xyz_path, final_atoms = self._final_atoms_from_output(output, workdir, job_label)
                 return output, xyz_path, final_atoms
 
-            current_atoms = self._restart_geometry(output, workdir, job_label, fallback=current_atoms)
             attempt += 1
 
         raise OpiJobError(
@@ -285,7 +256,7 @@ class OpiRunner:
         mult: int = 1,
     ) -> tuple[Output, Path, Atoms]:
         """Standard Opt+Freq at same theory level as TS."""
-        block_strings = [_geom_block_text(self.settings.geom_maxiter, restart=False)]
+        block_strings = [_geom_block_text(self.settings.geom_maxiter)]
         output = self._run_calculation(
             atoms,
             job_name,

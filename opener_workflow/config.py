@@ -23,21 +23,14 @@ class OpiSettings:
     mpi_path: str | None = None  # Optional OpenMPI path for Runner
     n_cores: int = 54
     max_core_mb: int = 8000
+    method_keywords: List[str] = field(
+        default_factory=lambda: _split_keywords("! B3LYP D3BJ def2-SVP")
+    )
     ts_keywords: List[str] = field(
-        default_factory=lambda: _split_keywords("! B3LYP D3BJ def2-SVP OptTS Freq")
+        default_factory=lambda: _split_keywords("OptTS Freq")
     )
-    ts_restart_keywords: List[str] = field(
-        default_factory=lambda: _split_keywords("TightSCF XQC")
-    )
-    ts_restart_blocks: List[str] = field(
-        default_factory=lambda: ["%method SpecialGridAtoms 1:Grid7 end"]
-    )
-    opt_keywords: List[str] = field(
-        default_factory=lambda: _split_keywords("! B3LYP D3BJ def2-SVP Opt Freq")
-    )
-    irc_keywords: List[str] = field(
-        default_factory=lambda: _split_keywords("! B3LYP D3BJ def2-SVP IRC")
-    )
+    opt_keywords: List[str] = field(default_factory=lambda: _split_keywords("Opt Freq"))
+    irc_keywords: List[str] = field(default_factory=lambda: _split_keywords("IRC"))
     geom_maxiter: int = 200
     irc_maxiter: int = 50
     max_restarts: int = 2
@@ -45,14 +38,22 @@ class OpiSettings:
 
 @dataclass
 class SOAPSettings:
-    """Parameters for SOAP descriptor generation."""
+    """
+    Parameters for SOAP descriptor generation.
 
-    r_cut: float = 10.0
-    n_max: int = 6
-    l_max: int = 4
+    average_mode options:
+    - "off": per-atom descriptors (shape n_atoms x n_features), used by current dedup logic.
+    - "outer": average local power spectra to a single global vector.
+    - "inner": average neighbor densities first, then build a single global vector.
+    - True/False: aliases for "outer"/"off".
+    """
+
+    r_cut: float = 6.0
+    n_max: int = 8
+    l_max: int = 6
     average_mode: str = "off"  # per-atom descriptors
     kernel_gamma: float | None = None  # if None, set to 1 / feature_dim
-    threshold_similarity: float = 0.9
+    threshold_similarity: float = 0.99
 
 
 @dataclass
