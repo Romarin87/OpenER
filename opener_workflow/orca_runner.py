@@ -20,11 +20,11 @@ _OPI_SRC = Path(__file__).resolve().parents[1] / "opi" / "src"
 if _OPI_SRC.exists() and str(_OPI_SRC) not in sys.path:
     sys.path.insert(0, str(_OPI_SRC))
 
-from opi.core import Calculator  # type: ignore  # noqa: E402
-from opi.input.arbitrary_string import ArbitraryStringPos  # type: ignore  # noqa: E402
-from opi.input.blocks.block_irc import BlockIrc  # type: ignore  # noqa: E402
-from opi.input.structures import Structure  # type: ignore  # noqa: E402
-from opi.output.core import Output  # type: ignore  # noqa: E402
+from opi.core import Calculator  
+from opi.input.arbitrary_string import ArbitraryStringPos  
+from opi.input.blocks.block_irc import BlockIrc  
+from opi.input.structures import Structure  
+from opi.output.core import Output  
 
 logger = logging.getLogger("opener.orca_runner")
 
@@ -151,10 +151,10 @@ class OpiRunner:
                 output.parse(do_create_property_json=True, do_create_gbw_json=True)
             except Exception:  # noqa: BLE001
                 short_path = Path(outfile).name
-                logger.warning("Parse failed for %s; using .out (%s)", job_name, short_path)
+                logger.warning("Parse JSON for %s failed; fallback to text output %s", job_name, short_path)
         except Exception:  # noqa: BLE001
             short_path = Path(outfile).name
-            logger.warning("Parse failed for %s; using .out (%s)", job_name, short_path)
+            logger.warning("Parse JSON for %s failed; fallback to text output %s", job_name, short_path)
         return output
 
     def _final_atoms_from_output(self, output: Output, workdir: Path, job_label: str) -> tuple[Path, Atoms]:

@@ -26,7 +26,7 @@ class OpiSettings:
     method_keywords: List[str] = field(
         default_factory=lambda: _split_keywords("! B3LYP D3BJ def2-SVP")
     )
-    geom_maxiter: int | None = None  # None means use ORCA default (max(3N,50))
+    geom_maxiter: int | None = 200  # None means use ORCA default (max(3N,50))
     ts_keywords: List[str] = field(
         default_factory=lambda: _split_keywords("OptTS Freq")
     )
