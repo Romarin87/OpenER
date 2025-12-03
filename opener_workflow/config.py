@@ -26,14 +26,16 @@ class OpiSettings:
     method_keywords: List[str] = field(
         default_factory=lambda: _split_keywords("! B3LYP D3BJ def2-SVP")
     )
+    geom_maxiter: int | None = None  # None means use ORCA default (max(3N,50))
     ts_keywords: List[str] = field(
         default_factory=lambda: _split_keywords("OptTS Freq")
     )
+    ts_recalc_hess: int | None = 5  # steps between Hessian rebuilds on TS retries; None to disable
+    ts_max_restarts: int = 1  # TS optimization restarts
     opt_keywords: List[str] = field(default_factory=lambda: _split_keywords("Opt Freq"))
     irc_keywords: List[str] = field(default_factory=lambda: _split_keywords("IRC"))
-    geom_maxiter: int = 200
     irc_maxiter: int = 50
-    max_restarts: int = 2
+    irc_max_retries: int = 1  # single-direction IRC retries on SMILES mismatch
 
 
 @dataclass

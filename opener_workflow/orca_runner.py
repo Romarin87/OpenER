@@ -52,9 +52,16 @@ def _normalize_keywords(keywords: Sequence[str] | str) -> List[str]:
     return tokens
 
 
-def _geom_block_text(maxiter: int) -> str:
-    """Build a %geom block text."""
-    lines = ["%geom", f"  MaxIter {maxiter}", "end"]
+def _geom_block_text(maxiter: int | None, restart: bool = False, recalc_hess: int | None = None) -> str:
+    """Build a %geom block text; restart flag is kept for compatibility."""
+    lines = ["%geom"]
+    if maxiter is not None:
+        lines.append(f"  MaxIter {maxiter}")
+    if restart:
+        lines.append("  ReStart true")
+    if recalc_hess and recalc_hess > 0:
+        lines.append(f"  Recalc_Hess {int(recalc_hess)}")
+    lines.append("end")
     return "\n".join(lines)
 
 
@@ -178,10 +185,11 @@ class OpiRunner:
         """
         attempt = 0
         last_outfile: Path | None = None
-        while attempt <= self.settings.max_restarts:
+        while attempt <= self.settings.ts_max_restarts:
             suffix = "" if attempt == 0 else f"_retry{attempt}"
             job_label = job_name + suffix
-            block_strings = [_geom_block_text(self.settings.geom_maxiter)]
+            recalc = self.settings.ts_recalc_hess if attempt > 0 else None
+            block_strings = [_geom_block_text(self.settings.geom_maxiter, restart=False, recalc_hess=recalc)]
             keywords = self.settings.ts_keywords
 
             output = self._run_calculation(
@@ -213,7 +221,7 @@ class OpiRunner:
             attempt += 1
 
         raise OpiJobError(
-            f"TS optimization failed after {self.settings.max_restarts} restarts; see {Path(last_outfile).name if last_outfile else 'output'}"
+            f"TS optimization failed after {self.settings.ts_max_restarts} restarts; see {Path(last_outfile).name if last_outfile else 'output'}"
         )
 
     def run_irc(
@@ -223,29 +231,42 @@ class OpiRunner:
         workdir: Path,
         charge: int = 0,
         mult: int = 1,
-    ) -> tuple[Output, Path, Path, Atoms, Atoms]:
+        irc_maxiter: int | None = None,
+        direction: str = "both",
+    ) -> tuple[Output, Path | None, Path | None, Atoms | None, Atoms | None]:
         """
-        Submit IRC calculation in both directions and return endpoints.
+        Submit IRC calculation and return available endpoints.
+
+        direction: "both" (default), "forward", or "backward".
         """
-        irc_block = BlockIrc(direction="both", maxiter=self.settings.irc_maxiter)
+        maxiter = irc_maxiter if irc_maxiter is not None else self.settings.irc_maxiter
+        if direction not in {"both", "forward", "backward"}:
+            raise ValueError(f"Unsupported IRC direction: {direction}")
+        irc_block = BlockIrc(direction=direction, maxiter=maxiter)
+        geom_block = _geom_block_text(self.settings.geom_maxiter, restart=False, recalc_hess=None)
         output = self._run_calculation(
             atoms,
             job_name,
             workdir,
             self.settings.irc_keywords,
+            block_strings=[geom_block],
             blocks=[irc_block],
             charge=charge,
             mult=mult,
         )
         back_xyz = workdir / f"{job_name}_IRC_B.xyz"
         forward_xyz = workdir / f"{job_name}_IRC_F.xyz"
-        if not back_xyz.exists() or not forward_xyz.exists():
-            raise OpiJobError(
-                f"IRC endpoint xyz files not found: {back_xyz.name} and/or {forward_xyz.name}"
-            )
-        back_atoms = read_last_xyz_frame(back_xyz)
-        forward_atoms = read_last_xyz_frame(forward_xyz)
-        return output, back_xyz, forward_xyz, back_atoms, forward_atoms
+
+        back_atoms = forward_atoms = None
+        if direction in {"both", "backward"}:
+            if not back_xyz.exists():
+                raise OpiJobError(f"IRC backward xyz not found: {back_xyz.name}")
+            back_atoms = read_last_xyz_frame(back_xyz)
+        if direction in {"both", "forward"}:
+            if not forward_xyz.exists():
+                raise OpiJobError(f"IRC forward xyz not found: {forward_xyz.name}")
+            forward_atoms = read_last_xyz_frame(forward_xyz)
+        return output, (back_xyz if back_atoms is not None else None), (forward_xyz if forward_atoms is not None else None), back_atoms, forward_atoms
 
     def optimize_minimum(
         self,
@@ -256,7 +277,7 @@ class OpiRunner:
         mult: int = 1,
     ) -> tuple[Output, Path, Atoms]:
         """Standard Opt+Freq at same theory level as TS."""
-        block_strings = [_geom_block_text(self.settings.geom_maxiter)]
+        block_strings = [_geom_block_text(self.settings.geom_maxiter, restart=False, recalc_hess=None)]
         output = self._run_calculation(
             atoms,
             job_name,

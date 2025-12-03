@@ -134,25 +134,26 @@ class TransitionStatePipeline:
         if best_sim is not None:
             _log(f"SOAP max similarity {best_sim:.4f}" + (f" vs {match}" if match else ""))
 
-        try:
+        def _run_irc_and_endpoints(irc_maxiter: int):
             irc_start = time.perf_counter()
-            _log("Running IRC")
+            _log(f"Running IRC (maxiter={irc_maxiter}, direction=both)")
             irc_output, back_xyz, forward_xyz, irc_reactant, irc_product = self.runner.run_irc(
-                ts_atoms, job_name="irc", workdir=irc_dir, charge=charge, mult=mult
+                ts_atoms,
+                job_name="irc",
+                workdir=irc_dir,
+                charge=charge,
+                mult=mult,
+                irc_maxiter=irc_maxiter,
             )
             outputs.update(
                 {
                     "irc_out": str(irc_output.get_outfile()),
-                    "irc_backward_xyz": str(back_xyz),
-                    "irc_forward_xyz": str(forward_xyz),
+                    "irc_backward_xyz": str(back_xyz) if back_xyz else "",
+                    "irc_forward_xyz": str(forward_xyz) if forward_xyz else "",
                 }
             )
             _log(f"IRC completed in {time.perf_counter() - irc_start:.1f}s")
-        except Exception as exc:  # noqa: BLE001
-            _log(f"IRC failed: {exc}")
-            return _finalize(PipelineResult(label, "failed", f"IRC failed: {exc}", outputs, metadata))
 
-        try:
             opt_start = time.perf_counter()
             _log("Optimizing IRC endpoints")
             opt_r_output, opt_r_xyz, opt_r_atoms = self.runner.optimize_minimum(
@@ -170,44 +171,165 @@ class TransitionStatePipeline:
                 }
             )
             _log(f"Endpoint optimizations completed in {time.perf_counter() - opt_start:.1f}s")
+
+            freqs_r = read_frequencies(opt_r_output)
+            freqs_p = read_frequencies(opt_p_output)
+            metadata["reactant_freqs"] = freqs_r
+            metadata["product_freqs"] = freqs_p
+            if not is_minimum(freqs_r, self.cfg.freq) or not is_minimum(freqs_p, self.cfg.freq):
+                return False, "Endpoint minima have imaginary modes", None, irc_reactant, irc_product, opt_r_atoms, opt_p_atoms
+
+            ok_smiles, s_irc_r, s_irc_p, s_opt_r, s_opt_p = compare_endpoints(
+                irc_reactant, irc_product, opt_r_atoms, opt_p_atoms, isomeric=self.isomeric_smiles
+            )
+            metadata.update(
+                {
+                    "smiles_irc_reactant": s_irc_r,
+                    "smiles_irc_product": s_irc_p,
+                    "smiles_opt_reactant": s_opt_r,
+                    "smiles_opt_product": s_opt_p,
+                }
+            )
+            if not ok_smiles:
+                return False, "SMILES mismatch between IRC and minima", "smiles", irc_reactant, irc_product, opt_r_atoms, opt_p_atoms
+            return True, "ok", None, irc_reactant, irc_product, opt_r_atoms, opt_p_atoms
+
+        # First attempt: both directions
+        try:
+            success, detail, tag, irc_reactant, irc_product, opt_r_atoms, opt_p_atoms = _run_irc_and_endpoints(
+                self.cfg.opi.irc_maxiter
+            )
         except OpiJobError as exc:
             _log(f"Endpoint optimization failed: {exc}")
-            return _finalize(
-                PipelineResult(label, "failed", f"Endpoint optimization failed: {exc}", outputs, metadata)
-            )
+            return _finalize(PipelineResult(label, "failed", f"Endpoint optimization failed: {exc}", outputs, metadata))
+        except Exception as exc:  # noqa: BLE001
+            _log(f"IRC failed: {exc}")
+            return _finalize(PipelineResult(label, "failed", f"IRC failed: {exc}", outputs, metadata))
 
-        freqs_r = read_frequencies(opt_r_output)
-        freqs_p = read_frequencies(opt_p_output)
-        metadata["reactant_freqs"] = freqs_r
-        metadata["product_freqs"] = freqs_p
-        if not is_minimum(freqs_r, self.cfg.freq) or not is_minimum(freqs_p, self.cfg.freq):
-            _log("Endpoint minima have imaginary modes")
-            return _finalize(
-                PipelineResult(
-                    label,
-                    "failed",
-                    "Endpoint minima have imaginary modes",
-                    outputs,
-                    metadata,
+        if not success and tag == "smiles":
+            # Check which side mismatched and rerun single-direction IRC with higher maxiter for that side.
+            mismatch_reactant = metadata.get("smiles_irc_reactant") != metadata.get("smiles_opt_reactant")
+            mismatch_product = metadata.get("smiles_irc_product") != metadata.get("smiles_opt_product")
+            last_retry_maxiter: float | None = None
+
+            if mismatch_reactant:
+                for retry_idx in range(self.cfg.opi.irc_max_retries):
+                    irc_maxiter_retry = max(self.cfg.opi.irc_maxiter * (retry_idx + 2), self.cfg.opi.irc_maxiter + 1)
+                    last_retry_maxiter = irc_maxiter_retry
+                    try:
+                        _log(
+                            f"SMILES mismatch on reactant; rerunning backward IRC (attempt {retry_idx + 1}/{self.cfg.opi.irc_max_retries}) with maxiter={irc_maxiter_retry}"
+                        )
+                        _, back_xyz, _, irc_reactant_new, _ = self.runner.run_irc(
+                            ts_atoms,
+                            job_name=f"irc_retry_back{retry_idx + 1}",
+                            workdir=irc_dir,
+                            charge=charge,
+                            mult=mult,
+                            irc_maxiter=irc_maxiter_retry,
+                            direction="backward",
+                        )
+                        outputs["irc_backward_xyz_retry"] = str(back_xyz) if back_xyz else ""
+                        opt_r_output, opt_r_xyz, opt_r_atoms = self.runner.optimize_minimum(
+                            irc_reactant_new, job_name=f"reactant_retry{retry_idx + 1}", workdir=rp_dir, charge=charge, mult=mult
+                        )
+                        outputs["reactant_out_retry"] = str(opt_r_output.get_outfile())
+                        outputs["reactant_xyz_retry"] = str(opt_r_xyz)
+                        freqs_r = read_frequencies(opt_r_output)
+                        metadata["reactant_freqs"] = freqs_r
+                        if not is_minimum(freqs_r, self.cfg.freq):
+                            _log("Endpoint minima have imaginary modes after backward retry")
+                            return _finalize(
+                                PipelineResult(
+                                    label,
+                                    "failed",
+                                    "Endpoint minima have imaginary modes after backward retry",
+                                    outputs,
+                                    metadata,
+                                )
+                            )
+                        irc_reactant = irc_reactant_new
+                        break
+                    except Exception as exc:  # noqa: BLE001
+                        _log(f"Backward IRC retry attempt {retry_idx + 1} failed: {exc}")
+                        if retry_idx + 1 >= self.cfg.opi.irc_max_retries:
+                            return _finalize(PipelineResult(label, "failed", f"Backward IRC retry failed: {exc}", outputs, metadata))
+
+            if mismatch_product:
+                for retry_idx in range(self.cfg.opi.irc_max_retries):
+                    irc_maxiter_retry = max(self.cfg.opi.irc_maxiter * (retry_idx + 2), self.cfg.opi.irc_maxiter + 1)
+                    last_retry_maxiter = irc_maxiter_retry
+                    try:
+                        _log(
+                            f"SMILES mismatch on product; rerunning forward IRC (attempt {retry_idx + 1}/{self.cfg.opi.irc_max_retries}) with maxiter={irc_maxiter_retry}"
+                        )
+                        _, _, forward_xyz, _, irc_product_new = self.runner.run_irc(
+                            ts_atoms,
+                            job_name=f"irc_retry_forward{retry_idx + 1}",
+                            workdir=irc_dir,
+                            charge=charge,
+                            mult=mult,
+                            irc_maxiter=irc_maxiter_retry,
+                            direction="forward",
+                        )
+                        outputs["irc_forward_xyz_retry"] = str(forward_xyz) if forward_xyz else ""
+                        opt_p_output, opt_p_xyz, opt_p_atoms = self.runner.optimize_minimum(
+                            irc_product_new, job_name=f"product_retry{retry_idx + 1}", workdir=rp_dir, charge=charge, mult=mult
+                        )
+                        outputs["product_out_retry"] = str(opt_p_output.get_outfile())
+                        outputs["product_xyz_retry"] = str(opt_p_xyz)
+                        freqs_p = read_frequencies(opt_p_output)
+                        metadata["product_freqs"] = freqs_p
+                        if not is_minimum(freqs_p, self.cfg.freq):
+                            _log("Endpoint minima have imaginary modes after forward retry")
+                            return _finalize(
+                                PipelineResult(
+                                    label,
+                                    "failed",
+                                    "Endpoint minima have imaginary modes after forward retry",
+                                    outputs,
+                                    metadata,
+                                )
+                            )
+                        irc_product = irc_product_new
+                        break
+                    except Exception as exc:  # noqa: BLE001
+                        _log(f"Forward IRC retry attempt {retry_idx + 1} failed: {exc}")
+                        if retry_idx + 1 >= self.cfg.opi.irc_max_retries:
+                            return _finalize(PipelineResult(label, "failed", f"Forward IRC retry failed: {exc}", outputs, metadata))
+
+            # Re-evaluate SMILES with updated endpoints
+            ok, s_irc_r, s_irc_p, s_opt_r, s_opt_p = compare_endpoints(
+                irc_reactant, irc_product, opt_r_atoms, opt_p_atoms, isomeric=self.isomeric_smiles
+            )
+            metadata.update(
+                {
+                    "smiles_irc_reactant": s_irc_r,
+                    "smiles_irc_product": s_irc_p,
+                    "smiles_opt_reactant": s_opt_r,
+                    "smiles_opt_product": s_opt_p,
+                }
+            )
+            if not ok:
+                _log("SMILES mismatch between IRC and minima after directional retries")
+                # Cache this failed TS in the dedup DB to skip reruns of the same structure.
+                try:
+                    meta_fail = dict(metadata)
+                    meta_fail["status"] = "irc_smiles_mismatch"
+                    meta_fail["irc_retry_maxiter"] = last_retry_maxiter
+                    stored_total = self.dedup.register(ts_atoms, source=str(job_dir), metadata=meta_fail)
+                    _log(f"Registered failed TS (smiles mismatch) for comp={comp} (total {stored_total})")
+                except Exception as exc:  # noqa: BLE001
+                    _log(f"Failed to register mismatched TS in dedup DB: {exc}")
+                return _finalize(
+                    PipelineResult(label, "failed", "SMILES mismatch between IRC and minima after directional retries", outputs, metadata)
                 )
-            )
 
-        ok, s_irc_r, s_irc_p, s_opt_r, s_opt_p = compare_endpoints(
-            irc_reactant, irc_product, opt_r_atoms, opt_p_atoms, isomeric=self.isomeric_smiles
-        )
-        metadata.update(
-            {
-                "smiles_irc_reactant": s_irc_r,
-                "smiles_irc_product": s_irc_p,
-                "smiles_opt_reactant": s_opt_r,
-                "smiles_opt_product": s_opt_p,
-            }
-        )
-        if not ok:
-            _log("SMILES mismatch between IRC endpoints and optimized minima")
-            return _finalize(
-                PipelineResult(label, "failed", "SMILES mismatch between IRC and minima", outputs, metadata)
-            )
+        elif not success:
+            if detail == "Endpoint minima have imaginary modes":
+                _log(detail)
+                return _finalize(PipelineResult(label, "failed", detail, outputs, metadata))
+            return _finalize(PipelineResult(label, "failed", detail, outputs, metadata))
 
         stored_total = self.dedup.register(ts_atoms, source=str(job_dir), metadata=metadata)
         _log(f"Pipeline completed successfully; stored SOAP entry for comp={comp} (total {stored_total})")
