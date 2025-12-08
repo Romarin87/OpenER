@@ -1,155 +1,174 @@
 """
-Utilities to build and submit ORCA jobs with simple monitoring/restart logic.
+OPI-backed helpers to run ORCA calculations used in the workflow.
 """
 
 from __future__ import annotations
 
-import subprocess
-import textwrap
+import logging
+import os
+import sys
 from pathlib import Path
-from typing import Optional, Sequence
+from typing import Iterable, List, Sequence
 
 from ase import Atoms
-from ase.data import chemical_symbols
 
-from .config import OrcaSettings
-from .io_utils import atoms_to_orca_input, ensure_dir, read_last_xyz_frame
+from .config import OpiSettings
+from .io_utils import ensure_dir, read_last_xyz_frame, structure_to_atoms, write_xyz
+
+# Ensure the bundled OPI source is importable when the package is not installed.
+_OPI_SRC = Path(__file__).resolve().parents[1] / "opi" / "src"
+if _OPI_SRC.exists() and str(_OPI_SRC) not in sys.path:
+    sys.path.insert(0, str(_OPI_SRC))
+
+from opi.core import Calculator  
+from opi.input.arbitrary_string import ArbitraryStringPos  
+from opi.input.blocks.block_irc import BlockIrc  
+from opi.input.structures import Structure  
+from opi.output.core import Output  
+
+logger = logging.getLogger("opener.orca_runner")
 
 
-class OrcaJobError(RuntimeError):
-    """Raised when an ORCA job fails irrecoverably."""
+class OpiJobError(RuntimeError):
+    """Raised when an ORCA job fails using the OPI wrapper."""
 
 
-def run_orca_input(
-    input_text: str,
-    job_name: str,
-    workdir: Path,
-    executable: str,
-) -> Path:
-    """Write an ORCA input and execute it, returning the output path."""
-    ensure_dir(workdir)
-    inp = workdir / f"{job_name}.inp"
-    out = workdir / f"{job_name}.out"
-    inp.write_text(input_text)
+def _normalize_keywords(keywords: Sequence[str] | str) -> List[str]:
+    """Return a flat list of keywords without leading exclamation marks."""
+    tokens: List[str] = []
+    parts: Iterable[str]
+    if isinstance(keywords, str):
+        parts = keywords.replace("!", " ").split()
+    else:
+        collected: List[str] = []
+        for kw in keywords:
+            collected.extend(str(kw).replace("!", " ").split())
+        parts = collected
+
+    for kw in parts:
+        kw = kw.strip()
+        if kw:
+            tokens.append(kw)
+    return tokens
+
+
+def _geom_block_text(maxiter: int | None, restart: bool = False, recalc_hess: int | None = None) -> str:
+    """Build a %geom block text; restart flag is kept for compatibility."""
+    lines = ["%geom"]
+    if maxiter is not None:
+        lines.append(f"  MaxIter {maxiter}")
+    if restart:
+        lines.append("  ReStart true")
+    if recalc_hess and recalc_hess > 0:
+        lines.append(f"  Recalc_Hess {int(recalc_hess)}")
+    lines.append("end")
+    return "\n".join(lines)
+
+
+def _geometry_converged_from_outfile(outfile: Path) -> bool:
+    """
+    Fallback convergence detection by scanning the ORCA .out file when OPI parsing is incomplete.
+    """
     try:
-        with open(out, "w") as fout:
-            subprocess.run(
-                [executable, inp.name],
-                cwd=workdir,
-                check=True,
-                stdout=fout,
-                stderr=subprocess.STDOUT,
-            )
-    except subprocess.CalledProcessError as exc:
-        raise OrcaJobError(f"ORCA job {job_name} failed; inspect {out}") from exc
-    return out
+        text = Path(outfile).read_text(errors="ignore").upper()
+    except Exception:
+        return False
+    markers = (
+        "GEOMETRY OPTIMIZATION CONVERGED",
+        "THE OPTIMIZATION HAS CONVERGED",
+        "OPTIMIZATION CONVERGED",
+    )
+    return any(marker in text for marker in markers)
 
 
-def parse_orca_geometries(output_path: Path) -> list[Atoms]:
-    """
-    Parse every 'CARTESIAN COORDINATES (ANGSTROEM)' block into ASE Atoms.
-    """
-    valid_symbols = set(chemical_symbols)
-    lines = output_path.read_text(errors="ignore").splitlines()
-    blocks: list[list[tuple[str, tuple[float, float, float]]]] = []
-    coords: list[tuple[str, tuple[float, float, float]]] = []
-    reading = False
-    for line in lines:
-        if "CARTESIAN COORDINATES (ANGSTROEM)" in line.upper():
-            if coords:
-                blocks.append(coords)
-            coords = []
-            reading = False
-            continue
-        if "----" in line and not reading:
-            reading = True
-            continue
-        if reading:
-            if not line.strip():
-                if coords:
-                    blocks.append(coords)
-                coords = []
-                reading = False
-                continue
-            parts = line.split()
-            if len(parts) < 4:
-                continue
-            # ORCA often prints an index as the first column. Grab the first plausible element token.
-            sym_idx = 1 if parts[0].replace("-", "").replace("+", "").replace(".", "").isdigit() else 0
-            symbol = parts[sym_idx]
-            if symbol not in valid_symbols:
-                # Likely reached a footer or malformed line; stop current block.
-                if coords:
-                    blocks.append(coords)
-                coords = []
-                reading = False
-                continue
-            try:
-                x, y, z = map(float, parts[-3:])
-            except ValueError:
-                continue
-            coords.append((symbol, (x, y, z)))
-    if coords:
-        blocks.append(coords)
+class OpiRunner:
+    """Run ORCA calculations via the OPI Calculator wrapper."""
 
-    geoms: list[Atoms] = []
-    for block in blocks:
-        symbols = [c[0] for c in block]
-        positions = [c[1] for c in block]
-        geoms.append(Atoms(symbols=symbols, positions=positions))
-    return geoms
-
-
-def parse_orca_geometry(output_path: Path) -> Optional[Atoms]:
-    """
-    Parse the last 'CARTESIAN COORDINATES (ANGSTROEM)' block into an ASE Atoms.
-    """
-    geoms = parse_orca_geometries(output_path)
-    return geoms[-1] if geoms else None
-
-
-def orca_optimization_converged(output_path: Path) -> tuple[bool, str]:
-    """Detect whether ORCA reports convergence and return (ok, message)."""
-    text = output_path.read_text(errors="ignore")
-    lower = text.lower()
-    if "the optimization has converged" in lower or "optimization converged" in lower:
-        return True, "Optimization converged"
-    if "normal termination" in lower:
-        return True, "Normal termination"
-    if "scf convergence failure" in lower:
-        return False, "SCF did not converge"
-    if "maximum number of optimization cycles" in lower or "too many optimization cycles" in lower:
-        return False, "Max optimization cycles exceeded"
-    if "error" in lower:
-        return False, "Error reported by ORCA"
-    return False, "Convergence flag not found"
-
-
-class OrcaRunner:
-    """Thin wrapper around ORCA execution."""
-
-    def __init__(self, settings: OrcaSettings):
+    def __init__(self, settings: OpiSettings):
         self.settings = settings
+        self._configure_environment()
 
-    def _run_job(
+    def _configure_environment(self) -> None:
+        """Set environment variables expected by OPI for binary discovery."""
+        if self.settings.orca_path:
+            os.environ["OPI_ORCA"] = self.settings.orca_path
+        if self.settings.mpi_path:
+            os.environ["OPI_MPI"] = self.settings.mpi_path
+
+    def _run_calculation(
         self,
         atoms: Atoms,
         job_name: str,
         workdir: Path,
-        keywords: str,
-        blocks: Sequence[str],
+        keywords: Sequence[str],
+        *,
+        block_strings: Sequence[str] | None = None,
+        blocks: Sequence[object] | None = None,
         charge: int = 0,
         mult: int = 1,
-    ) -> Path:
-        text = atoms_to_orca_input(
-            atoms=atoms, keywords=keywords, blocks=blocks, charge=charge, mult=mult
-        )
-        return run_orca_input(
-            input_text=text,
-            job_name=job_name,
-            workdir=workdir,
-            executable=self.settings.executable,
-        )
+    ) -> Output:
+        """
+        Create an OPI calculator, write the input, run ORCA, and return the parsed Output.
+        """
+        workdir = ensure_dir(workdir)
+        calc = Calculator(basename=job_name, working_dir=workdir)
+        calc.structure = Structure.from_ase(atoms, charge=charge, multiplicity=mult)
+        calc.input.ncores = self.settings.n_cores
+        calc.input.memory = self.settings.max_core_mb
+
+        full_keywords = list(self.settings.method_keywords) + list(keywords)
+        for kw in _normalize_keywords(full_keywords):
+            calc.input.add_simple_keywords(kw)
+
+        for block_str in block_strings or ():
+            calc.input.add_arbitrary_string(block_str, pos=ArbitraryStringPos.TOP)
+
+        for block in blocks or ():
+            calc.input.add_blocks(block)
+
+        try:
+            calc.write_input()
+            ok = calc.run()
+            output = calc.get_output()
+        except Exception as exc:  # noqa: BLE001
+            # Continue to surface failures where ORCA itself did not finish.
+            raise OpiJobError(f"Failed to run ORCA job {job_name}: {exc}") from exc
+
+        try:
+            outfile = output.get_outfile()
+        except Exception:  # noqa: BLE001
+            outfile = workdir / f"{job_name}.out"
+
+        if not ok or not output.terminated_normally():
+            raise OpiJobError(f"ORCA job {job_name} failed; inspect {Path(outfile).name}")
+
+        # Try to ensure JSONs exist for downstream parsing; tolerate failures.
+        try:
+            if output.results_properties is None:
+                output.parse(do_create_property_json=True, do_create_gbw_json=False)
+        except FileNotFoundError:
+            try:
+                output.parse(do_create_property_json=True, do_create_gbw_json=True)
+            except Exception:  # noqa: BLE001
+                short_path = Path(outfile).name
+                logger.warning("Parse JSON for %s failed; fallback to text output %s", job_name, short_path)
+        except Exception:  # noqa: BLE001
+            short_path = Path(outfile).name
+            logger.warning("Parse JSON for %s failed; fallback to text output %s", job_name, short_path)
+        return output
+
+    def _final_atoms_from_output(self, output: Output, workdir: Path, job_label: str) -> tuple[Path, Atoms]:
+        """Return final atoms and ensure an xyz exists for downstream steps."""
+        xyz_path = Path(workdir) / f"{job_label}.xyz"
+        if xyz_path.exists():
+            atoms = read_last_xyz_frame(xyz_path)
+        else:
+            structure = output.get_structure()
+            if structure is None:
+                raise OpiJobError(f"No final structure found for {job_label}; see {output.get_outfile()}")
+            atoms = structure_to_atoms(structure)
+            write_xyz(atoms, xyz_path)
+        return xyz_path, atoms
 
     def optimize_ts(
         self,
@@ -158,50 +177,52 @@ class OrcaRunner:
         workdir: Path,
         charge: int = 0,
         mult: int = 1,
-        max_restarts: int = 2,
-    ) -> tuple[Path, Path, Atoms]:
+    ) -> tuple[Output, Path, Atoms]:
         """
         Run TS optimization with restart strategies when SCF/geometry convergence fails.
 
-        Returns the output path, ORCA-written xyz path, and the final geometry.
+        Returns the Output object, xyz path, and the final geometry.
         """
         attempt = 0
-        current_atoms = atoms
-        while attempt <= max_restarts:
+        last_outfile: Path | None = None
+        while attempt <= self.settings.ts_max_restarts:
             suffix = "" if attempt == 0 else f"_retry{attempt}"
             job_label = job_name + suffix
-            blocks = (
-                list(self.settings.common_resources)
-                + (list(self.settings.geom_block) if attempt == 0 else list(self.settings.ts_restart_blocks))
-            )
-            out = self._run_job(
-                current_atoms,
+            recalc = self.settings.ts_recalc_hess if attempt > 0 else None
+            block_strings = [_geom_block_text(self.settings.geom_maxiter, restart=False, recalc_hess=recalc)]
+            keywords = self.settings.ts_keywords
+
+            output = self._run_calculation(
+                atoms,
                 job_label,
                 workdir,
-                keywords=self.settings.ts_keywords,
-                blocks=blocks,
+                keywords,
+                block_strings=block_strings,
                 charge=charge,
                 mult=mult,
             )
-            ok, msg = orca_optimization_converged(out)
-            if ok:
-                xyz_path = workdir / f"{job_label}.xyz"
-                if not xyz_path.exists():
-                    raise OrcaJobError(f"Expected ORCA xyz file not found: {xyz_path}")
-                final_atoms = read_last_xyz_frame(xyz_path)
-                return out, xyz_path, final_atoms
+            try:
+                last_outfile = Path(output.get_outfile())
+            except Exception:
+                last_outfile = Path(workdir) / f"{job_label}.out"
+
+            converged = False
+            try:
+                converged = bool(output.geometry_optimization_converged())
+            except Exception:
+                converged = False
+            if not converged and last_outfile.exists():
+                converged = _geometry_converged_from_outfile(last_outfile)
+
+            if converged:
+                xyz_path, final_atoms = self._final_atoms_from_output(output, workdir, job_label)
+                return output, xyz_path, final_atoms
+
             attempt += 1
-            next_xyz = workdir / f"{job_label}.xyz"
-            if next_xyz.exists():
-                current_atoms = read_last_xyz_frame(next_xyz)
-                continue
-            next_geom = parse_orca_geometry(out)
-            if next_geom is not None:
-                current_atoms = next_geom
-            if attempt > max_restarts:
-                raise OrcaJobError(
-                    f"TS optimization failed after {max_restarts} restarts ({msg}); see {out}"
-                )
+
+        raise OpiJobError(
+            f"TS optimization failed after {self.settings.ts_max_restarts} restarts; see {Path(last_outfile).name if last_outfile else 'output'}"
+        )
 
     def run_irc(
         self,
@@ -210,27 +231,42 @@ class OrcaRunner:
         workdir: Path,
         charge: int = 0,
         mult: int = 1,
-    ) -> tuple[Path, Path, Path, Atoms, Atoms]:
+        irc_maxiter: int | None = None,
+        direction: str = "both",
+    ) -> tuple[Output, Path | None, Path | None, Atoms | None, Atoms | None]:
         """
-        Submit IRC calculation in both directions and return endpoints.
+        Submit IRC calculation and return available endpoints.
+
+        direction: "both" (default), "forward", or "backward".
         """
-        blocks = list(self.settings.common_resources) + [self.settings.irc_block]
-        out = self._run_job(
+        maxiter = irc_maxiter if irc_maxiter is not None else self.settings.irc_maxiter
+        if direction not in {"both", "forward", "backward"}:
+            raise ValueError(f"Unsupported IRC direction: {direction}")
+        irc_block = BlockIrc(direction=direction, maxiter=maxiter)
+        geom_block = _geom_block_text(self.settings.geom_maxiter, restart=False, recalc_hess=None)
+        output = self._run_calculation(
             atoms,
             job_name,
             workdir,
-            keywords=self.settings.irc_keywords,
-            blocks=blocks,
+            self.settings.irc_keywords,
+            block_strings=[geom_block],
+            blocks=[irc_block],
             charge=charge,
             mult=mult,
         )
         back_xyz = workdir / f"{job_name}_IRC_B.xyz"
         forward_xyz = workdir / f"{job_name}_IRC_F.xyz"
-        if not back_xyz.exists() or not forward_xyz.exists():
-            raise OrcaJobError(f"IRC endpoint xyz files not found: {back_xyz} and/or {forward_xyz}")
-        back_atoms = read_last_xyz_frame(back_xyz)
-        forward_atoms = read_last_xyz_frame(forward_xyz)
-        return out, back_xyz, forward_xyz, back_atoms, forward_atoms
+
+        back_atoms = forward_atoms = None
+        if direction in {"both", "backward"}:
+            if not back_xyz.exists():
+                raise OpiJobError(f"IRC backward xyz not found: {back_xyz.name}")
+            back_atoms = read_last_xyz_frame(back_xyz)
+        if direction in {"both", "forward"}:
+            if not forward_xyz.exists():
+                raise OpiJobError(f"IRC forward xyz not found: {forward_xyz.name}")
+            forward_atoms = read_last_xyz_frame(forward_xyz)
+        return output, (back_xyz if back_atoms is not None else None), (forward_xyz if forward_atoms is not None else None), back_atoms, forward_atoms
 
     def optimize_minimum(
         self,
@@ -239,49 +275,28 @@ class OrcaRunner:
         workdir: Path,
         charge: int = 0,
         mult: int = 1,
-    ) -> tuple[Path, Path, Atoms]:
-        """Standard Opt+Freq at same theory level as TS.
-
-        Returns the output path, ORCA-written xyz path, and the final geometry.
-        """
-        blocks = list(self.settings.common_resources) + list(self.settings.geom_block)
-        out = self._run_job(
+    ) -> tuple[Output, Path, Atoms]:
+        """Standard Opt+Freq at same theory level as TS."""
+        block_strings = [_geom_block_text(self.settings.geom_maxiter, restart=False, recalc_hess=None)]
+        output = self._run_calculation(
             atoms,
             job_name,
             workdir,
-            keywords=self.settings.opt_keywords,
-            blocks=blocks,
+            self.settings.opt_keywords,
+            block_strings=block_strings,
             charge=charge,
             mult=mult,
         )
-        ok, _ = orca_optimization_converged(out)
-        if not ok:
-            raise OrcaJobError(f"Minima optimization failed; inspect {out}")
-        xyz_path = workdir / f"{job_name}.xyz"
-        if not xyz_path.exists():
-            raise OrcaJobError(f"Expected ORCA xyz file not found: {xyz_path}")
-        final_atoms = read_last_xyz_frame(xyz_path)
-        return out, xyz_path, final_atoms
+        if not output.geometry_optimization_converged():
+            try:
+                out_name = Path(output.get_outfile()).name
+            except Exception:
+                out_name = f"{job_name}.out"
+            raise OpiJobError(f"Minima optimization failed; inspect {out_name}")
+        xyz_path, final_atoms = self._final_atoms_from_output(output, workdir, job_name)
+        return output, xyz_path, final_atoms
 
 
-def summarize_job_template(settings: OrcaSettings) -> str:
-    """Helper to display chosen ORCA keywords."""
-    return textwrap.dedent(
-        f"""
-        TS keywords: {settings.ts_keywords}
-        Common resources:
-        {chr(10).join(settings.common_resources)}
-
-        Geometry block:
-        {chr(10).join(settings.geom_block)}
-
-        TS restart blocks:
-        {chr(10).join(settings.ts_restart_blocks)}
-
-        IRC keywords: {settings.irc_keywords}
-        IRC block:
-        {settings.irc_block}
-
-        Opt keywords: {settings.opt_keywords}
-        """
-    ).strip()
+# Backwards compatibility for existing imports
+OrcaJobError = OpiJobError
+OrcaRunner = OpiRunner

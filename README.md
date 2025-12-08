@@ -3,12 +3,13 @@
 基于 ORCA 的化学基元反应过渡态工作流。该代码假定已准备好 TS 初始结构（xyz 或 inp），并且 ORCA/依赖库均已安装。
 
 ## 功能模块
-- TS 几何优化：`! B3LYP D3BJ def2-SVP OptTS Freq`，遇到 SCF/步数问题自动重启并启用更紧的设置。
+- TS 几何优化：统一方法关键词（`method_keywords`），TS 用 `OptTS Freq`，`MaxIter` 默认沿用 ORCA（不写）；若重跑，仍用相同关键词，可选每隔 `ts_recalc_hess` 步重算 Hessian。
 - 一阶鞍点验证：解析 ORCA 输出频率，要求虚频数量=1 且 |ν|>20 cm⁻¹。
-- SOAP 去重：使用 DScribe 生成全局 SOAP 描述符（`average="outer"`），SQLite 持久化，基于 Average Kernel (metric=laplacian) 相似度 S>0.999 判定重复。
-- IRC 路径：`! B3LYP D3BJ def2-SVP IRC`，Direction Both，MaxIter 50（可在 `config.py` 调整 StepSize/备用算法块）；流程直接使用 ORCA 写出的 `_IRC_B.xyz` / `_IRC_F.xyz` 作为反应物/生成物端点，缺失则视为 IRC 失败。
-- 端点最优化：与 TS 同级别 `! B3LYP D3BJ def2-SVP Opt Freq`，确认无虚频。
+- SOAP 去重：使用 DScribe 原子级 SOAP 描述符（`average="off"`），Laplacian 平均核，相似度阈值默认 0.99；指纹持久化 SQLite。若 IRC/SMILES 重试仍失败，会将该 TS 以状态写入 DB，下次命中直接跳过。
+- IRC 路径：`IRC`，默认双向、`irc_maxiter=50`。若 SMILES 不一致，会按不匹配方向单向重跑，步数递增，重试次数由 `irc_max_retries` 控制；仍不符则失败并缓存。
+- 端点最优化：与 TS 同级别 `Opt Freq`，确认无虚频。
 - Canonical SMILES 对比：OpenBabel 生成 SMILES，验证 IRC 端点与最优化结构拓扑一致。
+- 并行：仅在设置了 `OrcaSettings.launcher`（如 `srun`）时生效，可用 `PipelineConfig.max_workers` 控制并发处理多个 TS 输入。
 
 ## 快速开始
 ```bash

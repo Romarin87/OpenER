@@ -7,23 +7,25 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import time
 from dataclasses import asdict, dataclass, field
 from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Optional
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from ase import Atoms
 from tqdm import tqdm
 
 from .analysis import compare_endpoints, is_minimum, is_valid_saddle_point, read_frequencies
 from .config import PipelineConfig
-from .dedup import SOAPDeduplicator
+from .dedup import SOAPDeduplicator, composition_key
 from .io_utils import (
     ensure_dir,
     read_orca_input_geometry,
     read_xyz_frames,
 )
-from .orca_runner import OrcaJobError, OrcaRunner
+from .orca_runner import OpiJobError, OpiRunner
 
 logger = logging.getLogger("opener.workflow")
 
@@ -56,8 +58,9 @@ class TransitionStatePipeline:
         self.cfg = config or PipelineConfig()
         self.workdir = ensure_dir(workdir or _timestamped_workdir())
         self.dedup = SOAPDeduplicator(self.cfg.soap, Path(db_path))
-        self.runner = OrcaRunner(self.cfg.orca)
+        self.runner = OpiRunner(self.cfg.opi)
         self.isomeric_smiles = isomeric_smiles
+        self.max_workers = max(1, self.cfg.max_workers)
 
     def _process_atoms(
         self, atoms: Atoms, label: str, charge: int = 0, mult: int = 1
@@ -80,16 +83,18 @@ class TransitionStatePipeline:
             return res
 
         try:
+            ts_start = time.perf_counter()
             _log("Starting TS optimization")
-            ts_out, ts_xyz, ts_atoms = self.runner.optimize_ts(
+            ts_output, ts_xyz, ts_atoms = self.runner.optimize_ts(
                 atoms, job_name="ts_opt", workdir=ts_dir, charge=charge, mult=mult
             )
-            outputs.update({"ts_out": str(ts_out), "ts_xyz": str(ts_xyz)})
-        except OrcaJobError as exc:
+            outputs.update({"ts_out": str(ts_output.get_outfile()), "ts_xyz": str(ts_xyz)})
+            _log(f"TS optimization completed in {time.perf_counter() - ts_start:.1f}s")
+        except OpiJobError as exc:
             _log(f"TS optimization failed: {exc}")
             return _finalize(PipelineResult(label, "failed", f"TS optimization failed: {exc}", outputs))
 
-        freqs = read_frequencies(Path(ts_out))
+        freqs = read_frequencies(ts_output)
         metadata["ts_freqs"] = freqs
         if not is_valid_saddle_point(freqs, self.cfg.freq):
             _log("Failed saddle-point check")
@@ -97,105 +102,267 @@ class TransitionStatePipeline:
                 PipelineResult(label, "not_saddle", "Failed saddle-point check", outputs, metadata)
             )
 
-        is_dup, match = self.dedup.check_duplicate(ts_atoms)
+        dedup_start = time.perf_counter()
+        is_dup, match, best_sim, existing_count, sim_debug = self.dedup.check_duplicate(ts_atoms)
+        comp = composition_key(ts_atoms)
+        if match == "__incompatible__":
+            msg = (
+                "SOAP fingerprint dimension mismatch with DB; "
+                "current settings appear incompatible with existing entries. "
+                "Skipping registration to avoid corruption."
+            )
+            _log(msg)
+            return _finalize(PipelineResult(label, "failed", msg, outputs, metadata))
+        if best_sim is not None:
+            _log(
+                f"SOAP dedup check in {time.perf_counter() - dedup_start:.2f}s; "
+                f"comp={comp}, existing={existing_count}, max similarity {best_sim:.4f}, "
+                f"threshold {self.cfg.soap.threshold_similarity}"
+                + (f" vs {match}" if match else "")
+            )
+        else:
+            _log(
+                f"SOAP dedup check in {time.perf_counter() - dedup_start:.2f}s; "
+                f"comp={comp}, existing={existing_count}, similarity unavailable"
+                + (f" ({sim_debug})" if sim_debug else "")
+            )
+        metadata["soap_best_similarity"] = best_sim
         if is_dup:
-            msg = f"Duplicate of {match}" if match else "Duplicate structure"
+            msg = f"Duplicate of {match} (sim={best_sim:.4f})" if match and best_sim is not None else "Duplicate structure"
             _log(msg)
             return _finalize(PipelineResult(label, "duplicate", msg, outputs, metadata))
+        if best_sim is not None:
+            _log(f"SOAP max similarity {best_sim:.4f}" + (f" vs {match}" if match else ""))
 
-        try:
-            _log("Running IRC")
-            irc_out, back_xyz, forward_xyz, irc_reactant, irc_product = self.runner.run_irc(
-                ts_atoms, job_name="irc", workdir=irc_dir, charge=charge, mult=mult
+        def _run_irc_and_endpoints(irc_maxiter: int):
+            irc_start = time.perf_counter()
+            _log(f"Running IRC (maxiter={irc_maxiter}, direction=both)")
+            irc_output, back_xyz, forward_xyz, irc_reactant, irc_product = self.runner.run_irc(
+                ts_atoms,
+                job_name="irc",
+                workdir=irc_dir,
+                charge=charge,
+                mult=mult,
+                irc_maxiter=irc_maxiter,
             )
             outputs.update(
                 {
-                    "irc_out": str(irc_out),
-                    "irc_backward_xyz": str(back_xyz),
-                    "irc_forward_xyz": str(forward_xyz),
+                    "irc_out": str(irc_output.get_outfile()),
+                    "irc_backward_xyz": str(back_xyz) if back_xyz else "",
+                    "irc_forward_xyz": str(forward_xyz) if forward_xyz else "",
                 }
             )
-        except Exception as exc:  # noqa: BLE001
-            _log(f"IRC failed: {exc}")
-            return _finalize(PipelineResult(label, "failed", f"IRC failed: {exc}", outputs, metadata))
+            _log(f"IRC completed in {time.perf_counter() - irc_start:.1f}s")
 
-        try:
+            opt_start = time.perf_counter()
             _log("Optimizing IRC endpoints")
-            opt_r_out, opt_r_xyz, opt_r_atoms = self.runner.optimize_minimum(
+            opt_r_output, opt_r_xyz, opt_r_atoms = self.runner.optimize_minimum(
                 irc_reactant, job_name="reactant", workdir=rp_dir, charge=charge, mult=mult
             )
-            opt_p_out, opt_p_xyz, opt_p_atoms = self.runner.optimize_minimum(
+            opt_p_output, opt_p_xyz, opt_p_atoms = self.runner.optimize_minimum(
                 irc_product, job_name="product", workdir=rp_dir, charge=charge, mult=mult
             )
             outputs.update(
                 {
-                    "reactant_out": str(opt_r_out),
-                    "product_out": str(opt_p_out),
+                    "reactant_out": str(opt_r_output.get_outfile()),
+                    "product_out": str(opt_p_output.get_outfile()),
                     "reactant_xyz": str(opt_r_xyz),
                     "product_xyz": str(opt_p_xyz),
                 }
             )
-        except OrcaJobError as exc:
+            _log(f"Endpoint optimizations completed in {time.perf_counter() - opt_start:.1f}s")
+
+            freqs_r = read_frequencies(opt_r_output)
+            freqs_p = read_frequencies(opt_p_output)
+            metadata["reactant_freqs"] = freqs_r
+            metadata["product_freqs"] = freqs_p
+            if not is_minimum(freqs_r, self.cfg.freq) or not is_minimum(freqs_p, self.cfg.freq):
+                return False, "Endpoint minima have imaginary modes", None, irc_reactant, irc_product, opt_r_atoms, opt_p_atoms
+
+            ok_smiles, s_irc_r, s_irc_p, s_opt_r, s_opt_p = compare_endpoints(
+                irc_reactant, irc_product, opt_r_atoms, opt_p_atoms, isomeric=self.isomeric_smiles
+            )
+            metadata.update(
+                {
+                    "smiles_irc_reactant": s_irc_r,
+                    "smiles_irc_product": s_irc_p,
+                    "smiles_opt_reactant": s_opt_r,
+                    "smiles_opt_product": s_opt_p,
+                }
+            )
+            if not ok_smiles:
+                return False, "SMILES mismatch between IRC and minima", "smiles", irc_reactant, irc_product, opt_r_atoms, opt_p_atoms
+            return True, "ok", None, irc_reactant, irc_product, opt_r_atoms, opt_p_atoms
+
+        # First attempt: both directions
+        try:
+            success, detail, tag, irc_reactant, irc_product, opt_r_atoms, opt_p_atoms = _run_irc_and_endpoints(
+                self.cfg.opi.irc_maxiter
+            )
+        except OpiJobError as exc:
             _log(f"Endpoint optimization failed: {exc}")
-            return _finalize(
-                PipelineResult(label, "failed", f"Endpoint optimization failed: {exc}", outputs, metadata)
-            )
+            return _finalize(PipelineResult(label, "failed", f"Endpoint optimization failed: {exc}", outputs, metadata))
+        except Exception as exc:  # noqa: BLE001
+            _log(f"IRC failed: {exc}")
+            return _finalize(PipelineResult(label, "failed", f"IRC failed: {exc}", outputs, metadata))
 
-        freqs_r = read_frequencies(Path(opt_r_out))
-        freqs_p = read_frequencies(Path(opt_p_out))
-        metadata["reactant_freqs"] = freqs_r
-        metadata["product_freqs"] = freqs_p
-        if not is_minimum(freqs_r, self.cfg.freq) or not is_minimum(freqs_p, self.cfg.freq):
-            _log("Endpoint minima have imaginary modes")
-            return _finalize(
-                PipelineResult(
-                    label,
-                    "failed",
-                    "Endpoint minima have imaginary modes",
-                    outputs,
-                    metadata,
+        if not success and tag == "smiles":
+            # Check which side mismatched and rerun single-direction IRC with higher maxiter for that side.
+            mismatch_reactant = metadata.get("smiles_irc_reactant") != metadata.get("smiles_opt_reactant")
+            mismatch_product = metadata.get("smiles_irc_product") != metadata.get("smiles_opt_product")
+            last_retry_maxiter: float | None = None
+
+            if mismatch_reactant:
+                for retry_idx in range(self.cfg.opi.irc_max_retries):
+                    irc_maxiter_retry = max(self.cfg.opi.irc_maxiter * (retry_idx + 2), self.cfg.opi.irc_maxiter + 1)
+                    last_retry_maxiter = irc_maxiter_retry
+                    try:
+                        _log(
+                            f"SMILES mismatch on reactant; rerunning backward IRC (attempt {retry_idx + 1}/{self.cfg.opi.irc_max_retries}) with maxiter={irc_maxiter_retry}"
+                        )
+                        _, back_xyz, _, irc_reactant_new, _ = self.runner.run_irc(
+                            ts_atoms,
+                            job_name=f"irc_retry_back{retry_idx + 1}",
+                            workdir=irc_dir,
+                            charge=charge,
+                            mult=mult,
+                            irc_maxiter=irc_maxiter_retry,
+                            direction="backward",
+                        )
+                        outputs["irc_backward_xyz_retry"] = str(back_xyz) if back_xyz else ""
+                        opt_r_output, opt_r_xyz, opt_r_atoms = self.runner.optimize_minimum(
+                            irc_reactant_new, job_name=f"reactant_retry{retry_idx + 1}", workdir=rp_dir, charge=charge, mult=mult
+                        )
+                        outputs["reactant_out_retry"] = str(opt_r_output.get_outfile())
+                        outputs["reactant_xyz_retry"] = str(opt_r_xyz)
+                        freqs_r = read_frequencies(opt_r_output)
+                        metadata["reactant_freqs"] = freqs_r
+                        if not is_minimum(freqs_r, self.cfg.freq):
+                            _log("Endpoint minima have imaginary modes after backward retry")
+                            return _finalize(
+                                PipelineResult(
+                                    label,
+                                    "failed",
+                                    "Endpoint minima have imaginary modes after backward retry",
+                                    outputs,
+                                    metadata,
+                                )
+                            )
+                        irc_reactant = irc_reactant_new
+                        break
+                    except Exception as exc:  # noqa: BLE001
+                        _log(f"Backward IRC retry attempt {retry_idx + 1} failed: {exc}")
+                        if retry_idx + 1 >= self.cfg.opi.irc_max_retries:
+                            return _finalize(PipelineResult(label, "failed", f"Backward IRC retry failed: {exc}", outputs, metadata))
+
+            if mismatch_product:
+                for retry_idx in range(self.cfg.opi.irc_max_retries):
+                    irc_maxiter_retry = max(self.cfg.opi.irc_maxiter * (retry_idx + 2), self.cfg.opi.irc_maxiter + 1)
+                    last_retry_maxiter = irc_maxiter_retry
+                    try:
+                        _log(
+                            f"SMILES mismatch on product; rerunning forward IRC (attempt {retry_idx + 1}/{self.cfg.opi.irc_max_retries}) with maxiter={irc_maxiter_retry}"
+                        )
+                        _, _, forward_xyz, _, irc_product_new = self.runner.run_irc(
+                            ts_atoms,
+                            job_name=f"irc_retry_forward{retry_idx + 1}",
+                            workdir=irc_dir,
+                            charge=charge,
+                            mult=mult,
+                            irc_maxiter=irc_maxiter_retry,
+                            direction="forward",
+                        )
+                        outputs["irc_forward_xyz_retry"] = str(forward_xyz) if forward_xyz else ""
+                        opt_p_output, opt_p_xyz, opt_p_atoms = self.runner.optimize_minimum(
+                            irc_product_new, job_name=f"product_retry{retry_idx + 1}", workdir=rp_dir, charge=charge, mult=mult
+                        )
+                        outputs["product_out_retry"] = str(opt_p_output.get_outfile())
+                        outputs["product_xyz_retry"] = str(opt_p_xyz)
+                        freqs_p = read_frequencies(opt_p_output)
+                        metadata["product_freqs"] = freqs_p
+                        if not is_minimum(freqs_p, self.cfg.freq):
+                            _log("Endpoint minima have imaginary modes after forward retry")
+                            return _finalize(
+                                PipelineResult(
+                                    label,
+                                    "failed",
+                                    "Endpoint minima have imaginary modes after forward retry",
+                                    outputs,
+                                    metadata,
+                                )
+                            )
+                        irc_product = irc_product_new
+                        break
+                    except Exception as exc:  # noqa: BLE001
+                        _log(f"Forward IRC retry attempt {retry_idx + 1} failed: {exc}")
+                        if retry_idx + 1 >= self.cfg.opi.irc_max_retries:
+                            return _finalize(PipelineResult(label, "failed", f"Forward IRC retry failed: {exc}", outputs, metadata))
+
+            # Re-evaluate SMILES with updated endpoints
+            ok, s_irc_r, s_irc_p, s_opt_r, s_opt_p = compare_endpoints(
+                irc_reactant, irc_product, opt_r_atoms, opt_p_atoms, isomeric=self.isomeric_smiles
+            )
+            metadata.update(
+                {
+                    "smiles_irc_reactant": s_irc_r,
+                    "smiles_irc_product": s_irc_p,
+                    "smiles_opt_reactant": s_opt_r,
+                    "smiles_opt_product": s_opt_p,
+                }
+            )
+            if not ok:
+                _log("SMILES mismatch between IRC and minima after directional retries")
+                # Cache this failed TS in the dedup DB to skip reruns of the same structure.
+                try:
+                    meta_fail = dict(metadata)
+                    meta_fail["status"] = "irc_smiles_mismatch"
+                    meta_fail["irc_retry_maxiter"] = last_retry_maxiter
+                    stored_total = self.dedup.register(ts_atoms, source=str(job_dir), metadata=meta_fail)
+                    _log(f"Registered failed TS (smiles mismatch) for comp={comp} (total {stored_total})")
+                except Exception as exc:  # noqa: BLE001
+                    _log(f"Failed to register mismatched TS in dedup DB: {exc}")
+                return _finalize(
+                    PipelineResult(label, "failed", "SMILES mismatch between IRC and minima after directional retries", outputs, metadata)
                 )
-            )
 
-        ok, s_irc_r, s_irc_p, s_opt_r, s_opt_p = compare_endpoints(
-            irc_reactant, irc_product, opt_r_atoms, opt_p_atoms, isomeric=self.isomeric_smiles
-        )
-        metadata.update(
-            {
-                "smiles_irc_reactant": s_irc_r,
-                "smiles_irc_product": s_irc_p,
-                "smiles_opt_reactant": s_opt_r,
-                "smiles_opt_product": s_opt_p,
-            }
-        )
-        if not ok:
-            _log("SMILES mismatch between IRC endpoints and optimized minima")
-            return _finalize(
-                PipelineResult(label, "failed", "SMILES mismatch between IRC and minima", outputs, metadata)
-            )
+        elif not success:
+            if detail == "Endpoint minima have imaginary modes":
+                _log(detail)
+                return _finalize(PipelineResult(label, "failed", detail, outputs, metadata))
+            return _finalize(PipelineResult(label, "failed", detail, outputs, metadata))
 
-        self.dedup.register(ts_atoms, source=str(job_dir), metadata=metadata)
-        _log("Pipeline completed successfully")
+        stored_total = self.dedup.register(ts_atoms, source=str(job_dir), metadata=metadata)
+        _log(f"Pipeline completed successfully; stored SOAP entry for comp={comp} (total {stored_total})")
         return _finalize(PipelineResult(label, "success", "Completed TS pipeline", outputs, metadata))
 
     def run_directory(self, ts_dir: str | Path, charge: int = 0, mult: int = 1) -> List[PipelineResult]:
         ts_dir = Path(ts_dir)
         inputs = sorted(list(ts_dir.glob("*.xyz")) + list(ts_dir.glob("*.inp")))
+        tasks: List[tuple[str, Atoms]] = []
         results: List[PipelineResult] = []
-        for path in tqdm(inputs, desc="TS structures"):
+
+        for path in inputs:
             try:
-                if path.suffix == ".xyz":
-                    atoms_list = read_xyz_frames(path)
-                else:
-                    atoms_list = [read_orca_input_geometry(path)]
+                atoms_list = read_xyz_frames(path) if path.suffix == ".xyz" else [read_orca_input_geometry(path)]
             except Exception as exc:  # noqa: BLE001
                 results.append(PipelineResult(path.stem, "failed", f"Input parse error: {exc}"))
                 continue
-
             for idx, atoms in enumerate(atoms_list):
                 label = f"{path.stem}_frame{idx}"
-                result = self._process_atoms(atoms, label, charge=charge, mult=mult)
-                results.append(result)
+                tasks.append((label, atoms))
+
+        if self.max_workers <= 1 or len(tasks) <= 1:
+            for label, atoms in tqdm(tasks, desc="TS structures"):
+                results.append(self._process_atoms(atoms, label, charge=charge, mult=mult))
+            return results
+
+        with ThreadPoolExecutor(max_workers=self.max_workers) as executor:
+            future_map = {
+                executor.submit(self._process_atoms, atoms, label, charge=charge, mult=mult): label
+                for label, atoms in tasks
+            }
+            for fut in tqdm(as_completed(future_map), total=len(future_map), desc="TS structures"):
+                results.append(fut.result())
         return results
 
 
@@ -205,7 +372,7 @@ def _cli() -> None:
     parser.add_argument(
         "--workdir",
         default=None,
-        help="Working directory for ORCA jobs; default uses runs/<timestamp>",
+        help="Working directory for ORCA/OPI jobs; default uses runs/<timestamp>",
     )
     parser.add_argument("--db", default="data/soap_db.sqlite", help="SQLite database for SOAP fingerprints")
     parser.add_argument("--charge", type=int, default=0, help="Total molecular charge")

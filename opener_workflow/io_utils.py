@@ -1,15 +1,25 @@
 """
-Lightweight IO helpers for ORCA jobs.
+Lightweight IO helpers for geometry files and conversions.
 """
 
 from __future__ import annotations
 
 import os
+import sys
 from pathlib import Path
-from typing import Iterable, List, Sequence
+from typing import Iterable, List, Sequence, Optional
 
 from ase import Atoms
 from ase.io import read, write
+
+_OPI_SRC = Path(__file__).resolve().parents[1] / "opi" / "src"
+if _OPI_SRC.exists() and str(_OPI_SRC) not in sys.path:
+    sys.path.insert(0, str(_OPI_SRC))
+
+try:  # pragma: no cover - optional dependency made available at runtime
+    from opi.input.structures import Structure  # type: ignore
+except Exception:  # noqa: BLE001
+    Structure = None  # type: ignore
 
 
 def read_xyz_frames(path: str | os.PathLike) -> List[Atoms]:
@@ -24,9 +34,12 @@ def read_xyz_frames(path: str | os.PathLike) -> List[Atoms]:
     return atoms_list
 
 
-def write_xyz(atoms: Atoms, path: str | os.PathLike) -> None:
-    """Write a single geometry to xyz."""
-    write(path, atoms, format="xyz")
+def write_xyz(atoms: Atoms, path: str | os.PathLike, comment: Optional[str] = None) -> None:
+    """Write a single geometry to xyz, with optional comment line."""
+    if comment:
+        write(path, atoms, format="xyz", comment=comment)
+    else:
+        write(path, atoms, format="xyz")
 
 
 def read_last_xyz_frame(path: str | os.PathLike) -> Atoms:
@@ -39,28 +52,6 @@ def read_last_xyz_frame(path: str | os.PathLike) -> Atoms:
     if isinstance(atoms, list):
         atoms = atoms[-1]
     return atoms
-
-
-def atoms_to_orca_input(
-    atoms: Atoms,
-    keywords: str,
-    blocks: Sequence[str],
-    charge: int = 0,
-    mult: int = 1,
-) -> str:
-    """
-    Build the contents of an ORCA input file for a given geometry.
-
-    Geometry is embedded as Cartesian coordinates in Angstrom.
-    """
-    lines: List[str] = [keywords, ""]
-    lines.extend(blocks)
-    lines.append("")
-    lines.append(f"* xyz {charge} {mult}")
-    for sym, pos in zip(atoms.get_chemical_symbols(), atoms.positions):
-        lines.append(f"{sym:2s} {pos[0]:15.8f} {pos[1]:15.8f} {pos[2]:15.8f}")
-    lines.append("*")
-    return "\n".join(lines) + "\n"
 
 
 def read_orca_input_geometry(path: str | os.PathLike) -> Atoms:
@@ -97,6 +88,34 @@ def ensure_dir(path: str | os.PathLike) -> Path:
     p = Path(path)
     p.mkdir(parents=True, exist_ok=True)
     return p
+
+
+def structure_to_atoms(structure: Structure) -> Atoms:
+    """Convert an OPI Structure into an ASE Atoms object."""
+    if Structure is None:
+        raise ImportError("OPI is not available; cannot convert Structure to Atoms")
+    symbols: List[str] = []
+    coords: List[Sequence[float]] = []
+    for atom in structure.atoms:
+        elem = getattr(atom, "element", None)
+        if elem is None:
+            raise ValueError("Structure atom missing element information")
+        symbols.append(getattr(elem, "symbol", str(elem)))
+        coord_obj = getattr(atom, "coordinates", None)
+        if coord_obj is None:
+            raise ValueError("Structure atom missing coordinates")
+        # Prefer direct array access to avoid truth-value issues in opi Coordinates.to_list
+        arr = getattr(coord_obj, "coordinates", None)
+        if arr is not None:
+            coords.append(list(arr))
+        elif hasattr(coord_obj, "to_list"):
+            coords.append(coord_obj.to_list())
+        else:
+            raise ValueError("Unsupported coordinate object on atom")
+    atoms = Atoms(symbols=symbols, positions=coords)
+    atoms.info["charge"] = getattr(structure, "charge", 0)
+    atoms.info["multiplicity"] = getattr(structure, "multiplicity", 1)
+    return atoms
 
 
 def chunked(iterable: Iterable, n: int) -> Iterable[List]:
