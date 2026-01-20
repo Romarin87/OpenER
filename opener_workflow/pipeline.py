@@ -179,7 +179,9 @@ class TransitionStatePipeline:
             }
         )
         metadata["cineb_selected_image"] = selected_image
-        if selected_energy is not None and selected_energy == selected_energy:
+        if selected_image < 0:
+            log("CINEB selected structure from converged XYZ output")
+        elif selected_energy is not None and selected_energy == selected_energy:
             metadata["cineb_selected_energy"] = selected_energy
             log(f"CINEB selected image {selected_image} (E={selected_energy:.8f})")
         else:

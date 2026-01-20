@@ -29,6 +29,14 @@ from opi.input.structures import Structure
 from opi.output.core import Output  
 
 logger = logging.getLogger("opener.orca_runner")
+_CINEB_FALLBACK_WARNED = False
+
+
+def _warn_cineb_fallback_once() -> None:
+    global _CINEB_FALLBACK_WARNED
+    if not _CINEB_FALLBACK_WARNED:
+        logger.warning("CINEB JSON unavailable; falling back to converged XYZ output")
+        _CINEB_FALLBACK_WARNED = True
 
 
 class OpiJobError(RuntimeError):
@@ -245,6 +253,19 @@ class OpiRunner:
             idx += 1
 
         if not images:
+            ci_xyz = workdir / f"{job_name}_NEB-CI_converged.xyz"
+            hei_xyz = workdir / f"{job_name}_NEB-HEI_converged.xyz"
+            fallback = None
+            for cand in (ci_xyz, hei_xyz):
+                if cand.exists():
+                    fallback = cand
+                    break
+            if fallback:
+                _warn_cineb_fallback_once()
+                selected_atoms = read_last_xyz_frame(fallback)
+                ts_guess_path = workdir / f"{job_name}_ts_guess.xyz"
+                write_xyz(selected_atoms, ts_guess_path)
+                return output, ts_guess_path, selected_atoms, -1, None
             raise OpiJobError("CINEB did not produce any image geometries")
 
         if np.all(np.isnan(energies)):
@@ -378,11 +399,22 @@ class OpiRunner:
             charge=charge,
             mult=mult,
         )
-        if not output.geometry_optimization_converged():
+        converged = False
+        try:
+            converged = bool(output.geometry_optimization_converged())
+        except Exception:
+            converged = False
+        outfile: Path | None = None
+        if not converged:
             try:
-                out_name = Path(output.get_outfile()).name
+                outfile = Path(output.get_outfile())
             except Exception:
-                out_name = f"{job_name}.out"
+                outfile = workdir / f"{job_name}.out"
+            if outfile.exists():
+                converged = _geometry_converged_from_outfile(outfile)
+
+        if not converged:
+            out_name = outfile.name if outfile else f"{job_name}.out"
             raise OpiJobError(f"Minima optimization failed; inspect {out_name}")
         xyz_path, final_atoms = self._final_atoms_from_output(output, workdir, job_name)
         return output, xyz_path, final_atoms
