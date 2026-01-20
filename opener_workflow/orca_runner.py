@@ -10,6 +10,7 @@ import sys
 from pathlib import Path
 from typing import Iterable, List, Sequence
 
+import numpy as np
 from ase import Atoms
 
 from .config import OpiSettings
@@ -22,6 +23,7 @@ if _OPI_SRC.exists() and str(_OPI_SRC) not in sys.path:
 
 from opi.core import Calculator  
 from opi.input.arbitrary_string import ArbitraryStringPos  
+from opi.input.blocks.block_neb import BlockNeb  
 from opi.input.blocks.block_irc import BlockIrc  
 from opi.input.structures import Structure  
 from opi.output.core import Output  
@@ -170,6 +172,93 @@ class OpiRunner:
             write_xyz(atoms, xyz_path)
         return xyz_path, atoms
 
+    def run_cineb(
+        self,
+        reactant: Atoms,
+        product: Atoms,
+        ts_guess: Atoms | None,
+        job_name: str,
+        workdir: Path,
+        charge: int = 0,
+        mult: int = 1,
+        nimages: int | None = None,
+        maxiter: int | None = None,
+        interpolation: str | None = None,
+        springconst: float | None = None,
+        use_ts_guess: bool | None = None,
+    ) -> tuple[Output, Path, Atoms, int, float | None]:
+        """
+        Run NEB-TS/CI and select a TS guess from the highest-energy image.
+        """
+        if len(reactant) != len(product):
+            raise OpiJobError("Reactant/product atom counts differ; NEB requires matching atoms")
+        workdir = ensure_dir(workdir)
+        end_xyz = workdir / f"{job_name}_product.xyz"
+        write_xyz(product, end_xyz)
+
+        block_kwargs: dict = {"neb_end_xyzfile": end_xyz.name}
+        nimages = self.settings.cineb_nimages if nimages is None else nimages
+        if nimages is not None:
+            block_kwargs["nimages"] = nimages
+        maxiter = self.settings.cineb_maxiter if maxiter is None else maxiter
+        if maxiter is not None:
+            block_kwargs["maxiter"] = maxiter
+        interpolation = self.settings.cineb_interpolation if interpolation is None else interpolation
+        if interpolation:
+            block_kwargs["interpolation"] = interpolation
+        springconst = self.settings.cineb_springconst if springconst is None else springconst
+        if springconst is not None:
+            block_kwargs["springconst"] = springconst
+        use_ts_guess = self.settings.cineb_use_ts_guess if use_ts_guess is None else use_ts_guess
+        if ts_guess is not None and use_ts_guess:
+            ts_input = workdir / f"{job_name}_ts_input.xyz"
+            write_xyz(ts_guess, ts_input)
+            block_kwargs["ts"] = ts_input.name
+
+        neb_block = BlockNeb(**block_kwargs)
+        output = self._run_calculation(
+            reactant,
+            job_name,
+            workdir,
+            self.settings.cineb_keywords,
+            blocks=[neb_block],
+            charge=charge,
+            mult=mult,
+        )
+
+        if output.results_properties is None:
+            try:
+                output.parse(do_create_property_json=True, do_create_gbw_json=False)
+            except Exception:  # noqa: BLE001
+                pass
+
+        images: List[Atoms] = []
+        energies: List[float] = []
+        idx = 1
+        while True:
+            structure = output.get_structure(index=idx)
+            if structure is None:
+                break
+            images.append(structure_to_atoms(structure))
+            energy = output.get_final_energy(index=idx)
+            energies.append(float(energy) if energy is not None else float("nan"))
+            idx += 1
+
+        if not images:
+            raise OpiJobError("CINEB did not produce any image geometries")
+
+        if np.all(np.isnan(energies)):
+            selected_idx = 0
+        else:
+            selected_idx = int(np.nanargmax(energies))
+
+        selected_atoms = images[selected_idx]
+        ts_guess_path = workdir / f"{job_name}_ts_guess.xyz"
+        write_xyz(selected_atoms, ts_guess_path)
+        selected_energy = energies[selected_idx] if energies else None
+        selected_image = selected_idx + 1
+        return output, ts_guess_path, selected_atoms, selected_image, selected_energy
+
     def optimize_ts(
         self,
         atoms: Atoms,
@@ -232,6 +321,7 @@ class OpiRunner:
         charge: int = 0,
         mult: int = 1,
         irc_maxiter: int | None = None,
+        recalc_hess: int | None = None,
         direction: str = "both",
     ) -> tuple[Output, Path | None, Path | None, Atoms | None, Atoms | None]:
         """
@@ -240,10 +330,11 @@ class OpiRunner:
         direction: "both" (default), "forward", or "backward".
         """
         maxiter = irc_maxiter if irc_maxiter is not None else self.settings.irc_maxiter
+        recalc = self.settings.irc_recalc_hess if recalc_hess is None else recalc_hess
         if direction not in {"both", "forward", "backward"}:
             raise ValueError(f"Unsupported IRC direction: {direction}")
         irc_block = BlockIrc(direction=direction, maxiter=maxiter)
-        geom_block = _geom_block_text(self.settings.geom_maxiter, restart=False, recalc_hess=None)
+        geom_block = _geom_block_text(self.settings.geom_maxiter, restart=False, recalc_hess=recalc)
         output = self._run_calculation(
             atoms,
             job_name,
