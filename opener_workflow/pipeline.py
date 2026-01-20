@@ -88,6 +88,23 @@ class TransitionStatePipeline:
         self.max_workers = max(1, self.cfg.max_workers)
 
     @staticmethod
+    def _abs_path(value: str | Path | None) -> str:
+        if value is None:
+            return ""
+        text = str(value).strip()
+        if not text:
+            return ""
+        path = Path(text).expanduser()
+        try:
+            resolved = path.resolve(strict=False)
+        except Exception:
+            resolved = path.absolute()
+        return str(resolved)
+
+    def _absolutize_outputs(self, outputs: Dict[str, str]) -> Dict[str, str]:
+        return {key: self._abs_path(val) for key, val in outputs.items()}
+
+    @staticmethod
     def _path_from_cell(value: Optional[str]) -> Optional[Path]:
         if value is None:
             return None
@@ -211,6 +228,12 @@ class TransitionStatePipeline:
             logs.append(msg)
 
         def _finalize(res: PipelineResult) -> PipelineResult:
+            res.outputs = self._absolutize_outputs(res.outputs)
+            input_meta = res.metadata.get("input")
+            if isinstance(input_meta, dict):
+                for key in ("ts", "reactant", "product"):
+                    if key in input_meta:
+                        input_meta[key] = self._abs_path(input_meta.get(key))
             (job_dir / "run.log").write_text("\n".join(logs))
             (job_dir / "result.json").write_text(json.dumps(asdict(res), indent=2))
             return res

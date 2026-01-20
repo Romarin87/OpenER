@@ -61,9 +61,9 @@ class OpiSettings:
     irc_max_retries: int = 0  # default: 0; single-direction IRC retries on SMILES mismatch
     irc_recalc_hess: int | None = 5  # default: 5; Hessian rebuild interval during IRC; None disables
 
-    # CINEB (NEB-TS)
+    # CINEB (NEB-CI)
     enable_cineb: bool = True  # default: True; enable CINEB pre-step
-    cineb_keywords: List[str] = field(default_factory=lambda: _split_keywords("neb-ts"))  # default: neb-ts
+    cineb_keywords: List[str] = field(default_factory=lambda: _split_keywords("neb-ci"))  # default: neb-ci (CINEB)
     cineb_nimages: int | None = None  # default (ORCA 6.1): 8
     cineb_maxiter: int | None = None  # default (ORCA 6.1): 500 (LBFGS), 1000 (VPO/FIRE)
     cineb_interpolation: str | None = None  # default (ORCA 6.1): IDPP

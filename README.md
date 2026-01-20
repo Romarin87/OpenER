@@ -3,7 +3,7 @@
 基于 ORCA 的化学基元反应过渡态工作流。输入通过 CSV 提供结构文件路径（xyz 或 inp），并假定 ORCA/依赖库均已安装。
 
 ## 功能模块
-- CINEB 预处理（可选）：基于 ORCA NEB（默认 `neb-ts`）使用反应物/产物端点生成更好的 TS 初始猜测。
+- CINEB 预处理（可选）：基于 ORCA NEB（默认 `neb-ci`）使用反应物/产物端点生成更好的 TS 初始猜测。
 - TS 几何优化：统一方法关键词（`method_keywords`），TS 用 `OptTS Freq`，`MaxIter` 默认沿用 ORCA（不写）；若重跑，仍用相同关键词，可选每隔 `ts_recalc_hess` 步重算 Hessian。
 - 一阶鞍点验证：解析 ORCA 输出频率，要求虚频数量=1 且 |ν|>20 cm⁻¹。
 - SOAP 去重：使用 DScribe 原子级 SOAP 描述符（`average="off"`），Laplacian 平均核，相似度阈值默认 0.99；指纹持久化 SQLite。可用 `PipelineConfig.enable_dedup=False` 关闭去重；关闭时不读写 DB。
