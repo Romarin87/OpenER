@@ -6,7 +6,7 @@
 - CINEB 预处理（可选）：基于 ORCA NEB（默认 `neb-ts`）使用反应物/产物端点生成更好的 TS 初始猜测。
 - TS 几何优化：统一方法关键词（`method_keywords`），TS 用 `OptTS Freq`，`MaxIter` 默认沿用 ORCA（不写）；若重跑，仍用相同关键词，可选每隔 `ts_recalc_hess` 步重算 Hessian。
 - 一阶鞍点验证：解析 ORCA 输出频率，要求虚频数量=1 且 |ν|>20 cm⁻¹。
-- SOAP 去重：使用 DScribe 原子级 SOAP 描述符（`average="off"`），Laplacian 平均核，相似度阈值默认 0.99；指纹持久化 SQLite。可用 `--no-dedup` 或 `PipelineConfig.enable_dedup=False` 关闭去重；关闭时不读写 DB。
+- SOAP 去重：使用 DScribe 原子级 SOAP 描述符（`average="off"`），Laplacian 平均核，相似度阈值默认 0.99；指纹持久化 SQLite。可用 `PipelineConfig.enable_dedup=False` 关闭去重；关闭时不读写 DB。
 - IRC 路径：`IRC`，默认双向、`irc_maxiter=50`，可选 `irc_recalc_hess` 控制 IRC 过程中 Hessian 重算频率。若 SMILES 不一致，会按不匹配方向单向重跑，步数递增，重试次数由 `irc_max_retries` 控制；仍不符则失败并缓存。
 - 端点最优化：与 TS 同级别 `Opt Freq`，确认无虚频。
 - Canonical SMILES 对比：OpenBabel 生成 SMILES，验证 IRC 端点与最优化结构拓扑一致。
@@ -25,22 +25,12 @@ rxn1,data/r1.xyz,data/p1.xyz,,0,1
 rxn2,data/r2.xyz,data/p2.xyz,data/ts2.xyz,0,1
 EOF
 
-# 运行工作流（启用 CINEB）
+# 运行工作流（参数由 config.py 控制）
 python -m opener_workflow.pipeline \
   --input-csv inputs.csv \
-  --cineb \
-  --db data/soap_db.sqlite \
-  --charge 0 --mult 1
+  --workdir runs/demo
 ```
-不启用 CINEB 时要求 TS 列有值（可不提供 React/Prod）：
-```bash
-python -m opener_workflow.pipeline \
-  --input-csv inputs.csv \
-  --db data/soap_db.sqlite \
-  --charge 0 --mult 1
-```
-可选 `--no-dedup` 关闭 SOAP 去重。
-可用 `--col-react/--col-prod/--col-ts/--col-label/--col-charge/--col-mult` 自定义列名。
+是否启用 CINEB、SOAP 去重、CSV 列名、默认电荷/自旋、多样性 SMILES 等请在 `config.py` 中设置。
 CSV 中的路径相对当前工作目录解析。
 
 未指定 `--workdir` 时默认生成 `runs/<时间戳>/`，避免覆盖旧结果；如需固定路径可显式传入。运行结束后，每个结构的结果放在 `workdir/<结构标签>/`，并包含：
@@ -49,7 +39,6 @@ CSV 中的路径相对当前工作目录解析。
 - `IRC/`：irc.inp/out 及 ORCA 写出的端点 `irc_IRC_B.xyz`（Backward）和 `irc_IRC_F.xyz`（Forward）。
 - `RP_opt/`：reactant.* 和 product.* 的 Opt+Freq 输出及 ORCA 写出的 reactant.xyz / product.xyz。
 - `run.log` 与 `result.json`：该结构的流程日志与摘要
-可选 `--json summary.json` 仍可导出全局汇总。
 
 ## 关键文件
 - `opener_workflow/config.py`：ORCA 关键字、SOAP 阈值、虚频判据。
@@ -61,4 +50,6 @@ CSV 中的路径相对当前工作目录解析。
 ## 说明
 - 默认理论水平和网格可在 `config.py` 中调整。
 - 每个输入文件默认只包含一个结构；inp 会自动解析 `* xyz` 块。
+- CINEB 开关在 `config.py` 的 `OpiSettings.enable_cineb`。
 - 若 IRC 或优化失败，会在结果中标记 `failed`，详细见对应 `.out`。
+- 汇总 JSON 默认写到 `workdir/summary.json`；可在 `config.py` 的 `PipelineConfig.summary_json` 调整或设为 `None` 关闭。

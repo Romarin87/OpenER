@@ -50,15 +50,15 @@ class OpiSettings:
         default_factory=lambda: _split_keywords("OptTS Freq")
     )  # default: OptTS Freq
     ts_recalc_hess: int | None = 5  # default: 5; Hessian rebuild interval on TS retries; None disables
-    ts_max_restarts: int = 1  # default: 1; TS optimization restarts
+    ts_max_restarts: int = 0  # default: 0; TS optimization restarts
 
     # Endpoint optimization
     opt_keywords: List[str] = field(default_factory=lambda: _split_keywords("Opt Freq"))  # default: Opt Freq
 
     # IRC
     irc_keywords: List[str] = field(default_factory=lambda: _split_keywords("IRC"))  # default: IRC
-    irc_maxiter: int = 50  # default: 50; IRC steps
-    irc_max_retries: int = 1  # default: 1; single-direction IRC retries on SMILES mismatch
+    irc_maxiter: int = 200  # default: 200; IRC steps
+    irc_max_retries: int = 0  # default: 0; single-direction IRC retries on SMILES mismatch
     irc_recalc_hess: int | None = 5  # default: 5; Hessian rebuild interval during IRC; None disables
 
     # CINEB (NEB-TS)
@@ -95,7 +95,7 @@ class SOAPSettings:
 class FrequencyCheck:
     """Thresholds for saddle point verification."""
 
-    min_imag_threshold: float = 20.0  # default: 20.0; cm^-1 absolute value
+    min_imag_threshold: float = 10.0  # default: 10.0; cm^-1 absolute value
     expected_imag_count: int = 1  # default: 1
 
 
@@ -107,5 +107,10 @@ class PipelineConfig:
     soap: SOAPSettings = field(default_factory=SOAPSettings)  # default: SOAPSettings()
     freq: FrequencyCheck = field(default_factory=FrequencyCheck)  # default: FrequencyCheck()
     input: CsvInputSettings = field(default_factory=CsvInputSettings)  # default: CsvInputSettings()
+    db_path: str = "data/soap_db.sqlite"  # default: data/soap_db.sqlite; SOAP DB path
+    summary_json: str | None = "summary.json"  # default: summary.json; set None to disable
+    default_charge: int = 0  # default: 0; used when CSV charge is blank
+    default_mult: int = 1  # default: 1; used when CSV mult is blank
+    isomeric_smiles: bool = True  # default: True; include stereochemistry in SMILES
     max_workers: int = 1  # default: 1; parallelism for processing multiple inputs
     enable_dedup: bool = False  # default: False; enable SOAP dedup

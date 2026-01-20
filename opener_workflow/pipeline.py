@@ -64,10 +64,10 @@ class TransitionStatePipeline:
         self,
         config: Optional[PipelineConfig] = None,
         workdir: str | Path | None = None,
-        db_path: str | Path = "data/soap_db.sqlite",
+        db_path: str | Path | None = None,
         enable_dedup: bool | None = None,
         enable_cineb: bool | None = None,
-        isomeric_smiles: bool = True,
+        isomeric_smiles: bool | None = None,
     ):
         self.cfg = config or PipelineConfig()
         self.workdir = ensure_dir(workdir or _timestamped_workdir())
@@ -77,11 +77,14 @@ class TransitionStatePipeline:
         self.enable_cineb = (
             self.cfg.opi.enable_cineb if enable_cineb is None else bool(enable_cineb)
         )
+        db_path = Path(self.cfg.db_path) if db_path is None else Path(db_path)
         self.dedup = (
-            SOAPDeduplicator(self.cfg.soap, Path(db_path)) if self.enable_dedup else None
+            SOAPDeduplicator(self.cfg.soap, db_path) if self.enable_dedup else None
         )
         self.runner = OpiRunner(self.cfg.opi)
-        self.isomeric_smiles = isomeric_smiles
+        self.isomeric_smiles = (
+            self.cfg.isomeric_smiles if isomeric_smiles is None else bool(isomeric_smiles)
+        )
         self.max_workers = max(1, self.cfg.max_workers)
 
     @staticmethod
@@ -515,12 +518,17 @@ class TransitionStatePipeline:
     def run_csv(
         self,
         csv_path: str | Path,
-        default_charge: int = 0,
-        default_mult: int = 1,
+        default_charge: int | None = None,
+        default_mult: int | None = None,
     ) -> List[PipelineResult]:
         csv_path = Path(csv_path)
         if not csv_path.exists():
             raise FileNotFoundError(csv_path)
+
+        if default_charge is None:
+            default_charge = self.cfg.default_charge
+        if default_mult is None:
+            default_mult = self.cfg.default_mult
 
         cfg = self.cfg.input
         results: List[PipelineResult] = []
@@ -646,55 +654,30 @@ class TransitionStatePipeline:
 def _cli() -> None:
     parser = argparse.ArgumentParser(description="TS workflow driver")
     parser.add_argument("--input-csv", required=True, help="CSV file containing input paths")
-    parser.add_argument("--col-react", default=None, help="CSV column name for reactant paths")
-    parser.add_argument("--col-prod", default=None, help="CSV column name for product paths")
-    parser.add_argument("--col-ts", default=None, help="CSV column name for TS guess paths")
-    parser.add_argument("--col-label", default=None, help="CSV column name for labels")
-    parser.add_argument("--col-charge", default=None, help="CSV column name for per-row charge")
-    parser.add_argument("--col-mult", default=None, help="CSV column name for per-row multiplicity")
     parser.add_argument(
         "--workdir",
         default=None,
         help="Working directory for ORCA/OPI jobs; default uses runs/<timestamp>",
     )
-    parser.add_argument("--db", default="data/soap_db.sqlite", help="SQLite database for SOAP fingerprints")
-    parser.add_argument("--charge", type=int, default=0, help="Total molecular charge")
-    parser.add_argument("--mult", type=int, default=1, help="Spin multiplicity")
-    parser.add_argument("--non-isomeric", action="store_true", help="Ignore stereochemistry in SMILES comparison")
-    parser.add_argument("--cineb", action="store_true", help="Enable CINEB refinement before TS optimization")
-    parser.add_argument("--no-dedup", action="store_true", help="Disable SOAP deduplication")
-    parser.add_argument("--json", default=None, help="Optional JSON file to write summary results")
     args = parser.parse_args()
 
     logging.basicConfig(level=logging.INFO, format="[%(levelname)s] %(message)s")
     config = PipelineConfig()
-    if args.col_react:
-        config.input.react_col = args.col_react
-    if args.col_prod:
-        config.input.prod_col = args.col_prod
-    if args.col_ts:
-        config.input.ts_col = args.col_ts
-    if args.col_label:
-        config.input.label_col = args.col_label
-    if args.col_charge:
-        config.input.charge_col = args.col_charge
-    if args.col_mult:
-        config.input.mult_col = args.col_mult
 
     pipeline = TransitionStatePipeline(
         config=config,
         workdir=args.workdir,
-        db_path=args.db,
-        enable_dedup=not args.no_dedup,
-        enable_cineb=args.cineb,
-        isomeric_smiles=not args.non_isomeric,
     )
     logger.info("Working directory: %s", pipeline.workdir)
-    results = pipeline.run_csv(args.input_csv, default_charge=args.charge, default_mult=args.mult)
+    results = pipeline.run_csv(args.input_csv)
     for res in results:
         logger.info("%s: %s - %s", res.label, res.status, res.detail)
-    if args.json:
-        Path(args.json).write_text(json.dumps([asdict(r) for r in results], indent=2))
+    if config.summary_json:
+        summary_path = Path(config.summary_json)
+        if not summary_path.is_absolute():
+            summary_path = pipeline.workdir / summary_path
+        summary_path.write_text(json.dumps([asdict(r) for r in results], indent=2))
+        logger.info("Wrote summary JSON to %s", summary_path)
 
 
 if __name__ == "__main__":
