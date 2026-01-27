@@ -149,6 +149,7 @@ class TransitionStatePipeline:
     def _prepare_ts_guess(
         self,
         ts_guess: Optional[Atoms],
+        ts_guess_path: Optional[Path],
         reactant_atoms: Optional[Atoms],
         product_atoms: Optional[Atoms],
         job_dir: Path,
@@ -162,6 +163,9 @@ class TransitionStatePipeline:
         if not self.enable_cineb:
             if ts_guess is None:
                 raise OpiJobError("TS guess is required when CINEB is disabled")
+            if ts_guess_path is not None:
+                metadata["ts_guess_source"] = str(ts_guess_path)
+                log(f"Using TS guess from {ts_guess_path}")
             return ts_guess
 
         if reactant_atoms is None or product_atoms is None:
@@ -175,7 +179,7 @@ class TransitionStatePipeline:
         cineb_dir = ensure_dir(job_dir / "CINEB")
         log("Starting CINEB refinement")
         cineb_start = time.perf_counter()
-        output, ts_xyz, ts_atoms, selected_image, selected_energy = self.runner.run_cineb(
+        output, ts_xyz, ts_atoms, selected_image, selected_energy, selected_source = self.runner.run_cineb(
             reactant_atoms,
             product_atoms,
             ts_guess=ts_guess_for_cineb,
@@ -196,8 +200,10 @@ class TransitionStatePipeline:
             }
         )
         metadata["cineb_selected_image"] = selected_image
+        metadata["cineb_selected_source"] = str(selected_source)
+        metadata["ts_guess_source"] = str(ts_xyz)
         if selected_image < 0:
-            log("CINEB selected structure from converged XYZ output")
+            log(f"CINEB selected structure from {selected_source.name}")
         elif selected_energy is not None and selected_energy == selected_energy:
             metadata["cineb_selected_energy"] = selected_energy
             log(f"CINEB selected image {selected_image} (E={selected_energy:.8f})")
@@ -240,14 +246,19 @@ class TransitionStatePipeline:
 
         try:
             ts_guess = None
+            ts_guess_path = None
             if row.ts_path and (not self.enable_cineb or self.cfg.opi.cineb_use_ts_guess):
                 ts_guess = self._read_single_structure(row.ts_path)
-            reactant_atoms = (
-                self._read_single_structure(row.reactant_path) if row.reactant_path else None
-            )
-            product_atoms = (
-                self._read_single_structure(row.product_path) if row.product_path else None
-            )
+                ts_guess_path = row.ts_path
+                _log(f"Loaded TS guess from {row.ts_path}")
+            reactant_atoms = None
+            if row.reactant_path:
+                reactant_atoms = self._read_single_structure(row.reactant_path)
+                _log(f"Loaded reactant from {row.reactant_path}")
+            product_atoms = None
+            if row.product_path:
+                product_atoms = self._read_single_structure(row.product_path)
+                _log(f"Loaded product from {row.product_path}")
         except Exception as exc:  # noqa: BLE001
             _log(f"Input parse error: {exc}")
             return _finalize(PipelineResult(label, "failed", f"Input parse error: {exc}", outputs, metadata))
@@ -255,6 +266,7 @@ class TransitionStatePipeline:
         try:
             ts_atoms = self._prepare_ts_guess(
                 ts_guess,
+                ts_guess_path,
                 reactant_atoms,
                 product_atoms,
                 job_dir,
@@ -273,7 +285,11 @@ class TransitionStatePipeline:
 
         try:
             ts_start = time.perf_counter()
-            _log("Starting TS optimization")
+            ts_source = metadata.get("ts_guess_source")
+            if ts_source:
+                _log(f"Starting TS optimization from {ts_source}")
+            else:
+                _log("Starting TS optimization")
             ts_output, ts_xyz, ts_atoms = self.runner.optimize_ts(
                 ts_atoms, job_name="ts_opt", workdir=ts_dir, charge=row.charge, mult=row.mult
             )
@@ -332,7 +348,11 @@ class TransitionStatePipeline:
 
         def _run_irc_and_endpoints(irc_maxiter: int):
             irc_start = time.perf_counter()
-            _log(f"Running IRC (maxiter={irc_maxiter}, direction=both)")
+            ts_source = outputs.get("ts_xyz")
+            if ts_source:
+                _log(f"Running IRC (maxiter={irc_maxiter}, direction=both) from {ts_source}")
+            else:
+                _log(f"Running IRC (maxiter={irc_maxiter}, direction=both)")
             irc_output, back_xyz, forward_xyz, irc_reactant, irc_product = self.runner.run_irc(
                 ts_atoms,
                 job_name="irc",
@@ -349,10 +369,20 @@ class TransitionStatePipeline:
                     "irc_forward_xyz": str(forward_xyz) if forward_xyz else "",
                 }
             )
+            endpoint_sources = []
+            if back_xyz is not None:
+                endpoint_sources.append(f"backward={back_xyz}")
+            if forward_xyz is not None:
+                endpoint_sources.append(f"forward={forward_xyz}")
+            if endpoint_sources:
+                _log("IRC endpoints from " + ", ".join(endpoint_sources))
             _log(f"IRC completed in {time.perf_counter() - irc_start:.1f}s")
 
             opt_start = time.perf_counter()
-            _log("Optimizing IRC endpoints")
+            if endpoint_sources:
+                _log("Optimizing IRC endpoints from " + ", ".join(endpoint_sources))
+            else:
+                _log("Optimizing IRC endpoints")
             opt_r_output, opt_r_xyz, opt_r_atoms = self.runner.optimize_minimum(
                 irc_reactant, job_name="reactant", workdir=rp_dir, charge=row.charge, mult=row.mult
             )

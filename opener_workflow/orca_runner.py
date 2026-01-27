@@ -10,7 +10,6 @@ import sys
 from pathlib import Path
 from typing import Iterable, List, Sequence
 
-import numpy as np
 from ase import Atoms
 
 from .config import OpiSettings
@@ -29,14 +28,6 @@ from opi.input.structures import Structure
 from opi.output.core import Output  
 
 logger = logging.getLogger("opener.orca_runner")
-_CINEB_FALLBACK_WARNED = False
-
-
-def _warn_cineb_fallback_once() -> None:
-    global _CINEB_FALLBACK_WARNED
-    if not _CINEB_FALLBACK_WARNED:
-        logger.warning("CINEB JSON unavailable; falling back to converged XYZ output")
-        _CINEB_FALLBACK_WARNED = True
 
 
 class OpiJobError(RuntimeError):
@@ -60,6 +51,16 @@ def _normalize_keywords(keywords: Sequence[str] | str) -> List[str]:
         if kw:
             tokens.append(kw)
     return tokens
+
+
+def _neb_mode_from_keywords(keywords: Sequence[str]) -> str:
+    """Infer NEB mode from keywords (neb-ts vs neb-ci)."""
+    text = " ".join(_normalize_keywords(keywords)).lower().replace("_", "-")
+    if "neb-ts" in text or "nebts" in text:
+        return "neb-ts"
+    if "neb-ci" in text or "nebci" in text or "cineb" in text:
+        return "neb-ci"
+    raise OpiJobError("NEB mode keywords must include neb-ts or neb-ci")
 
 
 def _geom_block_text(maxiter: int | None, restart: bool = False, recalc_hess: int | None = None) -> str:
@@ -194,9 +195,9 @@ class OpiRunner:
         interpolation: str | None = None,
         springconst: float | None = None,
         use_ts_guess: bool | None = None,
-    ) -> tuple[Output, Path, Atoms, int, float | None]:
+    ) -> tuple[Output, Path, Atoms, int, float | None, Path]:
         """
-        Run NEB-TS/CI and select a TS guess from the highest-energy image.
+        Run NEB-TS/CI and select a TS guess from the converged NEB output.
         """
         if len(reactant) != len(product):
             raise OpiJobError("Reactant/product atom counts differ; NEB requires matching atoms")
@@ -240,45 +241,21 @@ class OpiRunner:
             except Exception:  # noqa: BLE001
                 pass
 
-        images: List[Atoms] = []
-        energies: List[float] = []
-        idx = 1
-        while True:
-            structure = output.get_structure(index=idx)
-            if structure is None:
-                break
-            images.append(structure_to_atoms(structure))
-            energy = output.get_final_energy(index=idx)
-            energies.append(float(energy) if energy is not None else float("nan"))
-            idx += 1
-
-        if not images:
-            ci_xyz = workdir / f"{job_name}_NEB-CI_converged.xyz"
-            hei_xyz = workdir / f"{job_name}_NEB-HEI_converged.xyz"
-            fallback = None
-            for cand in (ci_xyz, hei_xyz):
-                if cand.exists():
-                    fallback = cand
-                    break
-            if fallback:
-                _warn_cineb_fallback_once()
-                selected_atoms = read_last_xyz_frame(fallback)
-                ts_guess_path = workdir / f"{job_name}_ts_guess.xyz"
-                write_xyz(selected_atoms, ts_guess_path)
-                return output, ts_guess_path, selected_atoms, -1, None
-            raise OpiJobError("CINEB did not produce any image geometries")
-
-        if np.all(np.isnan(energies)):
-            selected_idx = 0
+        neb_mode = _neb_mode_from_keywords(self.settings.cineb_keywords)
+        if neb_mode == "neb-ts":
+            converged = workdir / f"{job_name}_NEB-TS_converged.xyz"
+            label = "NEB-TS"
         else:
-            selected_idx = int(np.nanargmax(energies))
+            converged = workdir / f"{job_name}_NEB-CI_converged.xyz"
+            label = "NEB-CI"
 
-        selected_atoms = images[selected_idx]
+        if not converged.exists():
+            raise OpiJobError(f"{label} converged xyz not found: {converged.name}")
+
+        selected_atoms = read_last_xyz_frame(converged)
         ts_guess_path = workdir / f"{job_name}_ts_guess.xyz"
         write_xyz(selected_atoms, ts_guess_path)
-        selected_energy = energies[selected_idx] if energies else None
-        selected_image = selected_idx + 1
-        return output, ts_guess_path, selected_atoms, selected_image, selected_energy
+        return output, ts_guess_path, selected_atoms, -1, None, converged
 
     def optimize_ts(
         self,
